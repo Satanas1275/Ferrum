@@ -1,0 +1,10 @@
+[package]
+name = "test-1-7"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+flate2 = "1.1.9"
+md-5 = "0.10.6"
+rustyline = "15"
+tokio = { version = "1.52.3", features = ["full"] }

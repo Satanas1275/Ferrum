@@ -1,62 +1,68 @@
-# Homemade Minecraft Server (Rust)
+# Minecraft Server — 1.7.10 (Rust)
 
-A Minecraft server written from scratch in Rust (tokio, async), with no dependency on an existing protocol library. Networking, world generation, player state, inventory, etc. are all implemented by hand.
+A from-scratch, single-threaded async Minecraft server implementation for **1.7.10**, written in Rust with tokio. No existing protocol library used — packet handling, world state, and gameplay logic are all hand-rolled.
 
-Each major Minecraft version changes the protocol, block/mob registries, and world generation enough to justify a separate implementation. This repo therefore follows a **one branch per supported version** model rather than a single shared codebase across versions.
+> ⚠️ **Early stage.** This is a personal/hobby project, not a hardened production server. See [Known limitations / security](#known-limitations--security) before exposing it to anyone you don't trust.
 
-## Available branches
+## Features (this version)
 
-| Branch | MC version(s) | Status |
-|---|---|---|
-| [`1.7`](../../tree/1.7) | 1.7.10 | ✅ Active |
+- **Protocol handling** — handshake, login, status/ping
+- **Player management** — join/leave, movement, gamemode, chat
+- **World management** — flat world generation, chunk data, block place/break
+- **Full inventory system** — click, shift-click, hotbar swap, creative mode
+- **Item entities** — drop, pickup with delay, despawn after 5 minutes
+- **Combat** — entity use (attack), fall damage, health system
+- **Teleportation** — relative coordinates, cross-player, `@a` selector
+- **Console** — tab completion, `help`, `list`, `say`, `stop`, `gamemode`, `tp`
+- **Configuration** — via `server.json`
+- Built on **Rust 2024 edition**, tokio async runtime
 
-More branches will be added as new versions are supported (see Roadmap).
+## Requirements
 
-This `main` branch contains no code — it's an entry point / showcase for the project only.
+- Rust (2024 edition toolchain)
+- A Minecraft 1.7.10 client to connect
 
-## Why one branch per version?
-
-- The network protocol (packet IDs, data layout) changes between major versions.
-- New blocks and mobs added each version require an updated whitelist on the security side (e.g. rejecting block placement for anything the server doesn't recognize).
-- World generation changes fairly often.
-- As of recent versions (26.x), Mojang no longer obfuscates the Java client, which changes the implementation approach again.
-
-Sharing a single codebase across all versions would require a translation layer similar to ViaVersion — out of scope for now.
-
-## Running a version
+## Running
 
 ```bash
-git checkout 1.7
 cargo build --release
 ./target/release/<binary_name> --default-config
 ```
 
-(Always use `--release`: debug mode is noticeably slower, especially for chunk generation/compression.)
+Always run with `--release` — debug builds are noticeably slower, especially chunk generation/compression.
 
-## Contributing / porting a fix across branches
+`--default-config` generates a default `server.json` on first run if none exists. Edit it to change port, MOTD, max players, etc.
 
-Generic gameplay bugs (physics, inventory, respawn, etc.) often affect several branches at once. Convention followed here:
+## Known limitations / security
 
-1. The fix is committed first on the branch where the bug was found.
-2. It's then ported to other active branches via `git cherry-pick <hash>`.
-3. Each branch keeps a `CHANGELOG.md` to track which gameplay fixes have already been ported, to avoid missing or duplicating them across versions.
+This build has **no anti-cheat / server-side validation** yet. Known gaps:
 
-## Roadmap
+- No block registry check — clients can place block IDs the server doesn't recognize (including modded/invalid ones).
+- No duplicate-username protection — two clients can join with the same name.
+- No real authentication — no Mojang/Microsoft online-mode login handling.
 
-- [x] 1.7.10
-- [ ] 1.8.x
-- [ ] 1.12.x
-- [ ] 1.16.x
-- [ ] 1.20.x / 1.21.x
-- [ ] Track 26.x versions (non-obfuscated client)
+Don't run this on a public, untrusted network yet. Treat it as LAN/friends-only until the security pass (see roadmap) lands.
+
+## Coming soon
+
+- [ ] Multithreading support
+- [ ] Real world generation (currently flat only)
+- [ ] Sound implementation
+- [ ] Small fixes (knockback on PvP, correct damage values)
+- [ ] Critical hit implementation
+- [ ] Ender chest
+- [ ] Beds and sleeping
+- [ ] Server-side security pass (block registry validation, duplicate username prevention)
+- [ ] Mojang/Microsoft online-mode login
+- [ ] Rust mod support
+- [ ] Forge mod support
+- [ ] Fabric mod support
+- [ ] Ongoing bugfixing as issues are reported
 
 ## License
 
-Licensed under **CC BY-NC-SA 4.0** (Attribution-NonCommercial-ShareAlike). In short:
+CC BY-NC-SA 4.0 — see [LICENSE](LICENSE) on the `main` branch. TL;DR: fork it, modify it, share it, just don't sell it, and keep derivatives under the same license.
 
-- ✅ Forking, modifying, and redistributing is allowed
-- ✅ Publishing your fork's source is encouraged but not required
-- ❌ Commercial use (including selling the server or a modified version) is not allowed
-- 🔁 If you redistribute a modified version, it must stay under the same license
+## Contributing
 
-See [LICENSE](LICENSE) for the full text.
+Bug reports and PRs welcome. If a fix touches gameplay logic shared across versions, it may get cherry-picked to other version branches as they're added — see `main` for the branching convention.

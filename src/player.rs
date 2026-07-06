@@ -1,0 +1,28 @@
+use tokio::sync::mpsc;
+
+#[derive(Clone)]
+pub struct Player {
+    pub entity_id: i32,
+    pub uuid: String,
+    pub username: String,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub gamemode: u8,
+    pub inventory: [i16; 45],
+    pub counts: [u8; 45],
+    pub selected_slot: usize,
+    pub cursor_item: i16,
+    pub cursor_count: u8,
+    pub health: f32,
+    pub highest_y: f64,
+    pub sender: mpsc::UnboundedSender<Vec<u8>>,
+}
+
+impl Player {
+    pub fn held_item(&self) -> i16 {
+        self.inventory[36 + self.selected_slot]
+    }
+}
