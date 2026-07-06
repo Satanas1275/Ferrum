@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::io::Write as _;
 use std::sync::atomic::AtomicI32;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
@@ -12,11 +14,76 @@ use crate::items::ItemEntity;
 use crate::net::writing::build_packet;
 use crate::player::Player;
 
+#[derive(Clone)]
+pub struct TpsTracker {
+    history: VecDeque<Instant>,
+    last_cpu_total: u64,
+    last_cpu_time: Instant,
+    cpu_percent: f64,
+    tick_counter: u32,
+}
+
+impl TpsTracker {
+    pub fn new() -> Self {
+        Self {
+            history: VecDeque::with_capacity(18001),
+            last_cpu_total: 0,
+            last_cpu_time: Instant::now(),
+            cpu_percent: 0.0,
+            tick_counter: 0,
+        }
+    }
+
+    pub fn tick(&mut self) {
+        let now = Instant::now();
+        self.history.push_back(now);
+        if self.history.len() > 18000 {
+            self.history.pop_front();
+        }
+        self.tick_counter += 1;
+        if self.tick_counter >= 20 {
+            self.tick_counter = 0;
+            if let Ok(stat) = std::fs::read_to_string("/proc/self/stat") {
+                let parts: Vec<&str> = stat.split_whitespace().collect();
+                if parts.len() >= 15 {
+                    let utime: u64 = parts[13].parse().unwrap_or(0);
+                    let stime: u64 = parts[14].parse().unwrap_or(0);
+                    let cpu_total = utime + stime;
+                    let cpu_delta = cpu_total.saturating_sub(self.last_cpu_total);
+                    let wall_delta = now.duration_since(self.last_cpu_time).as_secs_f64();
+                    if self.last_cpu_total > 0 && wall_delta > 0.0 {
+                        self.cpu_percent = cpu_delta as f64 / 100.0 / wall_delta * 100.0;
+                    }
+                    self.last_cpu_total = cpu_total;
+                    self.last_cpu_time = now;
+                }
+            }
+        }
+    }
+
+    pub fn cpu(&self) -> f64 {
+        self.cpu_percent
+    }
+
+    pub fn tps(&self, window: Duration) -> f64 {
+        if self.history.len() < 2 {
+            return 0.0;
+        }
+        let cutoff = Instant::now() - window;
+        let count = self.history.iter().filter(|&&t| t > cutoff).count();
+        if count == 0 {
+            return 0.0;
+        }
+        count as f64 / window.as_secs_f64()
+    }
+}
+
 pub struct State {
     pub players: Mutex<HashMap<i32, Player>>,
     pub world: Mutex<HashMap<(i32, i32, i32), u16>>,
     pub items: Mutex<HashMap<i32, ItemEntity>>,
     pub next_id: AtomicI32,
+    pub tps: Mutex<TpsTracker>,
     pub config: ServerConfig,
 }
 
@@ -68,6 +135,7 @@ pub fn generate_section(
     section_y: i32,
 ) -> Vec<u8> {
     let mut block_data = [0u8; 4096];
+    let mut block_meta = [0u8; 4096];
     let mut sky_light = [0u8; 4096];
     let base_x = chunk_x * 16;
     let base_z = chunk_z * 16;
@@ -79,14 +147,16 @@ pub fn generate_section(
                 let wz = base_z + lz as i32;
                 let wy = y_start + ly as i32;
                 let idx = ly as usize * 256 + lz * 16 + lx;
-                block_data[idx] = get_block(world, wx, wy, wz) as u8;
+                let stored = get_block(world, wx, wy, wz);
+                block_data[idx] = stored as u8;
+                block_meta[idx] = ((stored >> 12) & 0x0F) as u8;
                 sky_light[idx] = if wy >= heights[lx][lz] { 15 } else { 0 };
             }
         }
     }
     let mut data = Vec::new();
     data.extend(block_data);
-    data.extend(vec![0u8; 2048]);
+    data.extend(pack_nibbles(&block_meta));
     data.extend(vec![0u8; 2048]);
     data.extend(pack_nibbles(&sky_light));
     data

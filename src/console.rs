@@ -4,9 +4,11 @@ use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::Helper;
 
+use std::time::Duration;
+
 use crate::game::commands::teleport_entity;
 use crate::packets;
-use crate::util::parse_rel_coord;
+use crate::util::{get_process_ram_mb, parse_rel_coord};
 use crate::world::SharedState;
 
 struct ConsoleHelper;
@@ -19,7 +21,7 @@ impl Completer for ConsoleHelper {
         _pos: usize,
         _ctx: &rustyline::Context<'_>,
     ) -> rustyline::Result<(usize, Vec<String>)> {
-        let cmds = ["help", "list", "say", "stop", "gamemode", "tp", "teleport"];
+        let cmds = ["help", "list", "say", "stop", "gamemode", "tp", "teleport", "tps", "load"];
         let trimmed = line.trim();
         let completions: Vec<String> = cmds.iter()
             .filter(|c| c.starts_with(trimmed))
@@ -47,6 +49,8 @@ async fn handle_console_command(parts: &[&str], state: &SharedState) {
             println!("  list                        - List online players");
             println!("  say <message>               - Broadcast a message");
             println!("  stop                        - Shutdown server");
+            println!("  tps                         - Show ticks per second");
+            println!("  load                        - Show RAM and CPU usage");
         }
         "list" => {
             let players = state.players.lock().await;
@@ -156,6 +160,24 @@ async fn handle_console_command(parts: &[&str], state: &SharedState) {
             } else {
                 println!("Usage: tp <player> <x> <y> <z> or tp <player> <target>");
             }
+        }
+        "tps" => {
+            let tps = state.tps.lock().await;
+            let tps_5s = tps.tps(Duration::from_secs(5));
+            let tps_30s = tps.tps(Duration::from_secs(30));
+            let tps_5min = tps.tps(Duration::from_secs(300));
+            let tps_15min = tps.tps(Duration::from_secs(900));
+            drop(tps);
+            println!("TPS (5s):   {tps_5s:.1}");
+            println!("TPS (30s):  {tps_30s:.1}");
+            println!("TPS (5m):   {tps_5min:.1}");
+            println!("TPS (15m):  {tps_15min:.1}");
+        }
+        "load" => {
+            let ram = get_process_ram_mb();
+            let cpu = state.tps.lock().await.cpu();
+            println!("RAM: {ram:.1} MB");
+            println!("CPU: {cpu:.1}%");
         }
         _ => {
             println!("Unknown command: {command}. Type help");

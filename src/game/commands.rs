@@ -1,5 +1,7 @@
+use std::time::Duration;
+
 use crate::packets;
-use crate::util::parse_rel_coord;
+use crate::util::{get_process_ram_mb, parse_rel_coord};
 use crate::world::SharedState;
 
 pub async fn teleport_entity(entity_id: i32, x: f64, y: f64, z: f64, yaw: f32, pitch: f32, state: &SharedState) {
@@ -58,6 +60,8 @@ pub async fn handle_player_command(state: &SharedState, entity_id: i32, message:
             let lines = vec![
                 "§6Commands: §f/gamemode <mode> §7- Change game mode",
                 "§f/tp [<player>|<@a>] [<x> <y> <z>|<player>] §7- Teleport (use ~ §7for relative coords)",
+                "§f/tps §7- Show ticks per second",
+                "§f/load §7- Show RAM and CPU usage",
                 "§f/help §7- This help",
             ];
             let players = state.players.lock().await;
@@ -164,6 +168,42 @@ pub async fn handle_player_command(state: &SharedState, entity_id: i32, message:
             let players = state.players.lock().await;
             if let Some(player) = players.get(&entity_id) {
                 let _ = player.sender.send(packet);
+            }
+        }
+        "/tps" => {
+            let tps = state.tps.lock().await;
+            let tps_5s = tps.tps(Duration::from_secs(5));
+            let tps_30s = tps.tps(Duration::from_secs(30));
+            let tps_5min = tps.tps(Duration::from_secs(300));
+            let tps_15min = tps.tps(Duration::from_secs(900));
+            drop(tps);
+            let lines = vec![
+                format!("§6TPS (5s):   §f{tps_5s:.1}"),
+                format!("§6TPS (30s):  §f{tps_30s:.1}"),
+                format!("§6TPS (5m):   §f{tps_5min:.1}"),
+                format!("§6TPS (15m):  §f{tps_15min:.1}"),
+            ];
+            let players = state.players.lock().await;
+            if let Some(player) = players.get(&entity_id) {
+                for line in &lines {
+                    let packet = packets::build_chat(&format!("{{\"text\":\"{line}\"}}"));
+                    let _ = player.sender.send(packet);
+                }
+            }
+        }
+        "/load" => {
+            let ram = get_process_ram_mb();
+            let cpu = state.tps.lock().await.cpu();
+            let lines = vec![
+                format!("§6RAM: §f{ram:.1} MB"),
+                format!("§6CPU: §f{cpu:.1}%"),
+            ];
+            let players = state.players.lock().await;
+            if let Some(player) = players.get(&entity_id) {
+                for line in &lines {
+                    let packet = packets::build_chat(&format!("{{\"text\":\"{line}\"}}"));
+                    let _ = player.sender.send(packet);
+                }
             }
         }
         _ => {

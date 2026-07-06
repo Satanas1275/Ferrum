@@ -52,8 +52,7 @@ pub fn build_spawn_player(j: &Player) -> Vec<u8> {
     let current_item = if current_item < 0 { 0 } else { current_item };
     content.extend(current_item.to_be_bytes());
 
-    content.extend(&[0x00, 0x00, 0x00]);
-    content.push(0x7F);
+    content.extend(&[0x00, 0x00, 0x00, 0x7F]);
     build_packet(0x0C, &mut content)
 }
 
@@ -123,17 +122,20 @@ pub fn build_destroy_entity(entity_id: i32) -> Vec<u8> {
     build_packet(0x13, &mut content)
 }
 
-pub fn build_block_change(x: i32, y: u8, z: i32, block: u16) -> Vec<u8> {
+pub fn build_block_change(x: i32, y: u8, z: i32, stored: u16) -> Vec<u8> {
+    let block = stored & 0xFFF;
+    let metadata = ((stored >> 12) & 0x0F) as u8;
     let mut content = Vec::new();
     content.extend(x.to_be_bytes());
     content.push(y);
     content.extend(z.to_be_bytes());
     content.extend(write_varint(block as i32));
-    content.push(0u8);
+    content.push(metadata);
     build_packet(0x23, &mut content)
 }
 
-pub fn block_to_item(block_id: u16) -> i16 {
+pub fn block_to_item(stored: u16) -> i16 {
+    let block_id = stored & 0xFFF;
     match block_id {
         1 => 4,
         2 => 3,
@@ -181,6 +183,15 @@ pub fn build_collect_item(collected_id: i32, collector_id: i32) -> Vec<u8> {
     build_packet(0x0D, &mut content)
 }
 
+pub fn build_entity_metadata_flags(entity_id: i32, sneaking: bool) -> Vec<u8> {
+    let mut content = Vec::new();
+    content.extend(entity_id.to_be_bytes());
+    content.push(0x00);
+    content.push(if sneaking { 0x02 } else { 0x00 });
+    content.push(0x7F);
+    build_packet(0x1C, &mut content)
+}
+
 pub fn build_update_health(health: f32, food: i16, saturation: f32) -> Vec<u8> {
     let mut content = Vec::new();
     content.extend(health.to_be_bytes());
@@ -194,6 +205,13 @@ pub fn build_entity_status(entity_id: i32, status: u8) -> Vec<u8> {
     content.extend(entity_id.to_be_bytes());
     content.push(status);
     build_packet(0x1A, &mut content)
+}
+
+pub fn build_animation(entity_id: i32, animation: u8) -> Vec<u8> {
+    let mut content = Vec::new();
+    content.extend(entity_id.to_be_bytes());
+    content.push(animation);
+    build_packet(0x28, &mut content)
 }
 
 pub fn build_respawn(dimension: i32, difficulty: u8, gamemode: u8) -> Vec<u8> {

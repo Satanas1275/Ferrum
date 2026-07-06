@@ -23,6 +23,19 @@ pub fn face_offset(x: i32, y: u8, z: i32, face: u8) -> (i32, i32, i32) {
     }
 }
 
+pub fn get_process_ram_mb() -> f64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("VmRSS:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|s| s.parse::<f64>().ok())
+                .map(|kb| kb / 1024.0)
+        })
+        .unwrap_or(0.0)
+}
+
 pub fn offline_uuid(username: &str) -> String {
     let mut hasher = Md5::new();
     hasher.update(b"OfflinePlayer:");

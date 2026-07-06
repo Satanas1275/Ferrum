@@ -17,6 +17,177 @@ use crate::world::{get_block, build_chunk_packet, SharedState};
 /// Rayon de recherche horizontale (en blocs) autour du point de spawn.
 const SPAWN_SEARCH_RADIUS: i32 = 8;
 
+fn is_interactive_block(stored: u16) -> bool {
+    matches!(stored & 0xFFF,
+        23 | 25 | 26 | 54 | 58 | 61 | 62 | 64 | 69 | 71 |
+        77 | 84 | 92 | 96 | 107 | 116 | 117 | 118 | 130 |
+        137 | 138 | 143 | 144 | 145 | 146 | 154 | 158 | 167 |
+        183 | 184 | 185 | 186
+    )
+}
+
+fn toggle_block(stored: u16) -> Option<u16> {
+    let block_id = stored & 0xFFF;
+    let meta = ((stored >> 12) & 0x0F) as u8;
+    let new_meta = match block_id as u16 {
+        64 | 71 | 96 | 167 | 107 | 183 | 184 | 185 | 186 => meta ^ 4,
+        69 | 143 => meta ^ 8,
+        77 => meta | 8,
+        _ => return None,
+    };
+    Some(block_id | ((new_meta as u16) << 12))
+}
+
+fn item_to_block_id(item_id: i16) -> u16 {
+    match item_id {
+        324 => 64,
+        330 => 71,
+        326 => 9,
+        327 => 11,
+        _ => item_id as u16,
+    }
+}
+
+fn block_metadata(block_id: u16, face: u8, yaw: f32) -> u8 {
+    let yaw_dir = ((yaw * 4.0 / 360.0 + 0.5).floor() as i32 & 3) as u8;
+    match block_id {
+        65 => match face {
+            2 | 3 | 4 | 5 => face,
+            _ => 2,
+        },
+        50 => match face {
+            0 | 1 => 5,
+            2 => 4,
+            3 => 3,
+            4 => 2,
+            5 => 1,
+            _ => 5,
+        },
+        75 | 76 => match face {
+            0 | 1 => 5,
+            2 => 4,
+            3 => 3,
+            4 => 2,
+            5 => 1,
+            _ => 5,
+        },
+        69 => match face {
+            0 => 0,
+            1 => 7,
+            2 => 4,
+            3 => 3,
+            4 => 2,
+            5 => 1,
+            _ => 0,
+        },
+        77 | 143 => match face {
+            0 => 0,
+            1 => 5,
+            2 => 4,
+            3 => 3,
+            4 => 2,
+            5 => 1,
+            _ => 0,
+        },
+        53 | 67 | 108 | 109 | 114 | 128 | 134 | 135 | 136 |
+        156 | 163 | 164 | 180 | 203 => {
+            let stair_dir: [u8; 4] = [2, 1, 3, 0];
+            let mut meta = stair_dir[yaw_dir as usize];
+            if face == 0 { meta |= 4; }
+            meta
+        },
+        54 | 61 | 62 | 130 => match face {
+            2 => 2,
+            3 => 3,
+            4 => 5,
+            5 => 4,
+            _ => 2,
+        },
+        33 | 34 => match face {
+            0 | 1 | 2 | 3 | 4 | 5 => face,
+            _ => 0,
+        },
+        23 | 158 => match face {
+            0 | 1 | 2 | 3 | 4 | 5 => face,
+            _ => 0,
+        },
+        96 | 167 => match face {
+            0 => 8,
+            1 => 0,
+            2 => 1,
+            3 => 0,
+            4 => 3,
+            5 => 2,
+            _ => 0,
+        },
+         107 | 183 | 184 | 185 | 186 => yaw_dir,
+         64 | 71 => (yaw_dir + 2) & 3,
+        26 => match face {
+            2 => 0,
+            3 => 1,
+            4 => 2,
+            5 => 3,
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
+fn food_heal(item_id: i16) -> f32 {
+    match item_id {
+        260 => 4.0,   // apple
+        297 => 5.0,   // bread
+        319 => 3.0,   // raw porkchop
+        320 => 8.0,   // cooked porkchop
+        322 => 4.0,   // golden apple
+        349 => 2.0,   // raw fish
+        350 => 5.0,   // cooked fish
+        354 => 2.0,   // cake (slice)
+        357 => 2.0,   // cookie
+        360 => 2.0,   // melon
+        363 => 3.0,   // raw beef
+        364 => 8.0,   // cooked beef
+        365 => 2.0,   // raw chicken
+        366 => 6.0,   // cooked chicken
+        411 => 3.0,   // raw rabbit
+        412 => 5.0,   // cooked rabbit
+        413 => 10.0,  // rabbit stew
+        423 => 2.0,   // raw mutton
+        424 => 6.0,   // cooked mutton
+        _ => 0.0,
+    }
+}
+
+async fn handle_item_use(state: &SharedState, entity_id: i32, item_id: i16) {
+    let heal = food_heal(item_id);
+    if heal > 0.0 {
+        let mut players = state.players.lock().await;
+        if let Some(player) = players.get_mut(&entity_id) {
+            if player.health >= 20.0 { return; }
+            player.health = (player.health + heal).min(20.0);
+            let health = player.health;
+            drop(players);
+            let health_pkt = packets::build_update_health(health, 20i16, 0.0);
+            let players = state.players.lock().await;
+            if let Some(player) = players.get(&entity_id) {
+                let _ = player.sender.send(health_pkt);
+            }
+        }
+        // remove one food item from hand
+        let mut players = state.players.lock().await;
+        if let Some(player) = players.get_mut(&entity_id) {
+            let held_idx = 36 + player.selected_slot;
+            if held_idx < 45 && player.inventory[held_idx] == item_id && player.counts[held_idx] > 0 {
+                player.counts[held_idx] -= 1;
+                if player.counts[held_idx] == 0 {
+                    player.inventory[held_idx] = -1;
+                }
+                let _ = player.sender.send(packets::build_set_slot(0, held_idx as i16, player.inventory[held_idx], player.counts[held_idx] as i8, 0));
+            }
+        }
+    }
+}
+
 /// Cherche un endroit libre pour spawn/respawn (2 blocs d'air : pieds + tête).
 ///
 /// Ordre de recherche :
@@ -202,6 +373,7 @@ pub async fn handle_client(mut socket: TcpStream, state: SharedState) -> std::io
         cursor_count: 0,
         health: 20.0,
         highest_y: spawn_y,
+        sneaking: false,
         sender: tx.clone(),
     };
 
@@ -224,6 +396,7 @@ pub async fn handle_client(mut socket: TcpStream, state: SharedState) -> std::io
             for pkt in packets::build_equipment_packets(other.entity_id, other) {
                 let _ = tx.send(pkt);
             }
+            let _ = tx.send(packets::build_entity_metadata_flags(other.entity_id, other.sneaking));
         }
 
         let list_packet = packets::build_player_list_item(&username, true);
@@ -462,6 +635,44 @@ async fn read_loop(
                     }
                 }
             }
+        } else if id == 0x0A {
+            let mut idx = 0;
+            let _anim_entity_id = read_i32_buf(&data, &mut idx);
+            let animation = read_u8_buf(&data, &mut idx);
+            if animation == 104 || animation == 105 {
+                let sneaking = animation == 104;
+                let mut players = state.players.lock().await;
+                if let Some(player) = players.get_mut(&entity_id) {
+                    player.sneaking = sneaking;
+                }
+                drop(players);
+                let pkt = packets::build_entity_metadata_flags(entity_id, sneaking);
+                let players = state.players.lock().await;
+                for (other_id, other) in players.iter() {
+                    if *other_id != entity_id {
+                        let _ = other.sender.send(pkt.clone());
+                    }
+                }
+            }
+        } else if id == 0x0B {
+            let mut idx = 0;
+            let _target = read_i32_buf(&data, &mut idx);
+            let action = read_u8_buf(&data, &mut idx);
+            if action == 1 || action == 2 {
+                let sneaking = action == 1;
+                let mut players = state.players.lock().await;
+                if let Some(player) = players.get_mut(&entity_id) {
+                    player.sneaking = sneaking;
+                }
+                drop(players);
+                let pkt = packets::build_entity_metadata_flags(entity_id, sneaking);
+                let players = state.players.lock().await;
+                for (other_id, other) in players.iter() {
+                    if *other_id != entity_id {
+                        let _ = other.sender.send(pkt.clone());
+                    }
+                }
+            }
         } else if id == 7 {
             let mut idx = 0;
             let status = read_u8_buf(&data, &mut idx);
@@ -569,30 +780,108 @@ async fn read_loop(
             let z = read_i32_buf(&data, &mut idx);
             let face = read_u8_buf(&data, &mut idx);
             let item_id = read_slot(&data, &mut idx);
-            println!("[PLACE] pos=({x},{y},{z}) face={face} item_id={item_id}");
-            if face < 6 {
+
+            if face >= 6 {
+                if item_id >= 0 {
+                    handle_item_use(state, entity_id, item_id).await;
+                }
+            } else {
                 let (nx, ny, nz) = face_offset(x, y, z, face);
-                if ny >= 0 && ny <= 255 && item_id >= 0 {
-                    {
+                if ny >= 0 && ny <= 255 {
+                    let clicked_block = {
+                        let world = state.world.lock().await;
+                        get_block(&world, x, y as i32, z)
+                    };
+
+                    if is_interactive_block(clicked_block) {
                         let mut world = state.world.lock().await;
-                        world.insert((nx, ny, nz), item_id as u16);
-                    }
-                    let packet = packets::build_block_change(nx, ny as u8, nz, item_id as u16);
-                    let mut players = state.players.lock().await;
-                    for (other_id, other) in players.iter() {
-                        if *other_id != entity_id {
-                            let _ = other.sender.send(packet.clone());
-                        }
-                    }
-                    if let Some(player) = players.get_mut(&entity_id) {
-                        if player.gamemode != 1 {
-                            let held_idx = 36 + player.selected_slot;
-                            if held_idx < 45 && player.inventory[held_idx] == item_id && player.counts[held_idx] > 0 {
-                                player.counts[held_idx] -= 1;
-                                if player.counts[held_idx] == 0 {
-                                    player.inventory[held_idx] = -1;
+                        if let Some(&stored) = world.get(&(x, y as i32, z)) {
+                            if let Some(new_stored) = toggle_block(stored) {
+                                world.insert((x, y as i32, z), new_stored);
+                                let pkt = packets::build_block_change(x, y, z, new_stored);
+                                let players = state.players.lock().await;
+                                for (_, other) in players.iter() {
+                                    let _ = other.sender.send(pkt.clone());
                                 }
-                                let _ = player.sender.send(packets::build_set_slot(0, held_idx as i16, player.inventory[held_idx], player.counts[held_idx] as i8, 0));
+                            }
+                        }
+                    } else if item_id >= 0 {
+                        let yaw = {
+                            let players = state.players.lock().await;
+                            players.get(&entity_id).map(|p| p.yaw).unwrap_or(0.0)
+                        };
+                        let block_id = item_to_block_id(item_id);
+                        let is_bucket = item_id == 326 || item_id == 327;
+                        let is_door = block_id == 64 || block_id == 71;
+                        let meta = block_metadata(block_id, face, yaw);
+                        let stored = (block_id as u16) | ((meta as u16) << 12);
+
+                        {
+                            let mut world = state.world.lock().await;
+                            world.insert((nx, ny, nz), stored);
+                        }
+
+                        let mut packets_to_broadcast: Vec<Vec<u8>> = Vec::new();
+                        packets_to_broadcast.push(packets::build_block_change(nx, ny as u8, nz, stored));
+
+                        if is_door && ny < 255 {
+                            let hinge_right = {
+                                let world = state.world.lock().await;
+                                let right_of = [(1i32, 0, 0), (0, 0, -1), (-1, 0, 0), (0, 0, 1)];
+                                let left_of = [(-1i32, 0, 0), (0, 0, 1), (1, 0, 0), (0, 0, -1)];
+                                let (rx, _, rz) = right_of[meta as usize];
+                                let (lx, _, lz) = left_of[meta as usize];
+                                let right = get_block(&world, nx + rx, ny, nz + rz);
+                                let left = get_block(&world, nx + lx, ny, nz + lz);
+                                let right_id = right & 0xFFF;
+                                let left_id = left & 0xFFF;
+                                let right_solid = right != 0 && right_id != 64 && right_id != 71;
+                                let left_solid = left != 0 && left_id != 64 && left_id != 71;
+                                if right_solid && !left_solid {
+                                    false
+                                } else if left_id == 64 || left_id == 71 {
+                                    let left_top = get_block(&world, nx + lx, ny + 1, nz + lz);
+                                    if ((left_top >> 12) & 0x0F) as u8 & 0x01 != 0 {
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                } else {
+                                    true
+                                }
+                            };
+                            let top_meta: u16 = if hinge_right { 0x09 } else { 0x08 };
+                            let top_stored = (block_id as u16) | (top_meta << 12);
+                            {
+                                let mut world = state.world.lock().await;
+                                world.insert((nx, ny + 1, nz), top_stored);
+                            }
+                            packets_to_broadcast.push(packets::build_block_change(nx, (ny + 1) as u8, nz, top_stored));
+                        }
+
+                        let mut players = state.players.lock().await;
+                        for (_, other) in players.iter() {
+                            for pkt in &packets_to_broadcast {
+                                let _ = other.sender.send(pkt.clone());
+                            }
+                        }
+
+                        if let Some(player) = players.get_mut(&entity_id) {
+                            if player.gamemode != 1 {
+                                let held_idx = 36 + player.selected_slot;
+                                if is_bucket {
+                                    if held_idx < 45 && player.inventory[held_idx] == item_id {
+                                        player.inventory[held_idx] = 325;
+                                        player.counts[held_idx] = 1;
+                                        let _ = player.sender.send(packets::build_set_slot(0, held_idx as i16, 325, 1, 0));
+                                    }
+                                } else if held_idx < 45 && player.inventory[held_idx] == item_id && player.counts[held_idx] > 0 {
+                                    player.counts[held_idx] -= 1;
+                                    if player.counts[held_idx] == 0 {
+                                        player.inventory[held_idx] = -1;
+                                    }
+                                    let _ = player.sender.send(packets::build_set_slot(0, held_idx as i16, player.inventory[held_idx], player.counts[held_idx] as i8, 0));
+                                }
                             }
                         }
                     }
@@ -620,51 +909,49 @@ async fn read_loop(
             let action = read_u8_buf(&data, &mut idx);
             if action == 0 {
                 let world_snapshot = state.world.lock().await.clone();
-                // Cherche un endroit sûr pour respawn (anneaux horizontaux
-                // d'abord, fallback vertical seulement si tout le rayon est bloqué)
                 let (spawn_x, spawn_y, spawn_z) = find_safe_spawn(&world_snapshot, 8, 8, 17);
+
+                let mut chunk_packets: Vec<Vec<u8>> = Vec::with_capacity(25);
+                for x in -2..=2 {
+                    for z in -2..=2 {
+                        chunk_packets.push(build_chunk_packet(x, z, &world_snapshot));
+                    }
+                }
+
+                let block_min = -2 * 16;
+                let block_max = 2 * 16 + 15;
+                let mut block_packets: Vec<Vec<u8>> = Vec::new();
+                for (&(wx, wy, wz), &block_id) in world_snapshot.iter() {
+                    if block_id != 0
+                        && wx >= block_min && wx <= block_max
+                        && wz >= block_min && wz <= block_max
+                        && wy >= 0 && wy <= 255
+                    {
+                        block_packets.push(packets::build_block_change(wx, wy as u8, wz, block_id));
+                    }
+                }
+
                 let mut players = state.players.lock().await;
                 if let Some(player) = players.get_mut(&entity_id) {
+                    let sender = player.sender.clone();
+                    let spawn_username = player.username.clone();
+                    let gamemode = player.gamemode;
                     player.health = 20.0;
                     player.x = spawn_x;
                     player.y = spawn_y;
                     player.z = spawn_z;
                     player.highest_y = spawn_y;
-                    // Dimension trick : si on renvoie Respawn avec la MÊME
-                    // dimension que celle où le client se trouve déjà (0),
-                    // certains clients traitent le paquet comme un no-op
-                    // partiel et ne quittent jamais vraiment l'écran de
-                    // mort. On bascule d'abord sur une dimension bidon puis
-                    // on revient sur la vraie, ce qui force un reset propre.
-                    let fake_dim = if player.gamemode == 1 { -1 } else { 1 };
-                    let _ = player.sender.send(packets::build_respawn(fake_dim, 1, player.gamemode));
-                    let respawn = packets::build_respawn(0, 1, player.gamemode);
-                    let _ = player.sender.send(respawn);
-                    for x in -2..=2 {
-                        for z in -2..=2 {
-                            let pkt = build_chunk_packet(x, z, &world_snapshot);
-                            let _ = player.sender.send(pkt);
-                        }
+                    let fake_dim = if gamemode == 1 { -1 } else { 1 };
+                    let _ = sender.send(packets::build_respawn(fake_dim, 1, gamemode));
+                    let _ = sender.send(packets::build_respawn(0, 1, gamemode));
+                    for pkt in &chunk_packets {
+                        let _ = sender.send(pkt.clone());
                     }
-                    let block_min = -2 * 16;
-                    let block_max = 2 * 16 + 15;
-                    for (&(wx, wy, wz), &block_id) in world_snapshot.iter() {
-                        if block_id != 0
-                            && wx >= block_min && wx <= block_max
-                            && wz >= block_min && wz <= block_max
-                            && wy >= 0 && wy <= 255
-                        {
-                            let pkt = packets::build_block_change(wx, wy as u8, wz, block_id);
-                            let _ = player.sender.send(pkt);
-                        }
+                    for pkt in &block_packets {
+                        let _ = sender.send(pkt.clone());
                     }
-                    let pos = packets::build_player_position_look(spawn_x, spawn_y, spawn_z, 0.0, 0.0);
-                    let _ = player.sender.send(pos);
-                    // Sans ça, le client garde en mémoire health=0 (reçu à
-                    // la mort) et l'écran "You Died" ne se ferme jamais,
-                    // même si la téléportation a bien eu lieu côté serveur.
-                    let health_reset = packets::build_update_health(20.0, 20i16, 0.0);
-                    let _ = player.sender.send(health_reset);
+                    let _ = sender.send(packets::build_player_position_look(spawn_x, spawn_y, spawn_z, 0.0, 0.0));
+                    let _ = sender.send(packets::build_update_health(20.0, 20i16, 0.0));
                     let destroy = packets::build_destroy_entity(entity_id);
                     let spawn = packets::build_spawn_player(player);
                     for (other_id, other) in players.iter() {
@@ -673,6 +960,17 @@ async fn read_loop(
                             let _ = other.sender.send(spawn.clone());
                         }
                     }
+                    for (other_id, other) in players.iter() {
+                        if *other_id != entity_id {
+                            let _ = sender.send(packets::build_player_list_item(&other.username, true));
+                            let _ = sender.send(packets::build_spawn_player(other));
+                            for pkt in packets::build_equipment_packets(other.entity_id, other) {
+                                let _ = sender.send(pkt);
+                            }
+                            let _ = sender.send(packets::build_entity_metadata_flags(other.entity_id, other.sneaking));
+                        }
+                    }
+                    let _ = sender.send(packets::build_player_list_item(&spawn_username, true));
                 }
             }
         }

@@ -7,15 +7,19 @@ A from-scratch, single-threaded async Minecraft server implementation for **1.7.
 ## Features (this version)
 
 - **Protocol handling** — handshake, login, status/ping
-- **Player management** — join/leave, movement, gamemode, chat
-- **World management** — flat world generation, chunk data, block place/break
+- **Player management** — join/leave, movement, gamemode, chat, sneak
+- **World management** — flat world generation, chunk data (with metadata), block place/break
+- **Interactive blocks** — doors, trapdoors, fence gates, levers, buttons, chests, furnaces, etc.
 - **Full inventory system** — click, shift-click, hotbar swap, creative mode
 - **Item entities** — drop, pickup with delay, despawn after 5 minutes
+- **Food system** — eat to heal (apple, bread, meats, etc.)
 - **Combat** — entity use (attack), fall damage, health system
 - **Teleportation** — relative coordinates, cross-player, `@a` selector
-- **Console** — tab completion, `help`, `list`, `say`, `stop`, `gamemode`, `tp`
+- **Console** — tab completion, `help`, `list`, `say`, `stop`, `gamemode`, `tp`, `tps`, `load`
+- **In-game commands** — `/gamemode`, `/tp`, `/tps`, `/load`, `/help`
+- **TPS tracking** — dedicated tick thread at 20 TPS, CPU/RAM monitoring
 - **Configuration** — via `server.json`
-- Built on **Rust 2024 edition**, tokio async runtime
+- Built on **Rust 2024 edition**, tokio async runtime (multi-threaded)
 
 ## Requirements
 
@@ -40,12 +44,14 @@ This build has **no anti-cheat / server-side validation** yet. Known gaps:
 - No block registry check — clients can place block IDs the server doesn't recognize (including modded/invalid ones).
 - No duplicate-username protection — two clients can join with the same name.
 - No real authentication — no Mojang/Microsoft online-mode login handling.
+- ⚠️ **Doors are buggy** — placement direction and hinge logic are not fully correct yet.
 
 Don't run this on a public, untrusted network yet. Treat it as LAN/friends-only until the security pass (see roadmap) lands.
 
 ## Coming soon
 
-- [ ] Multithreading support
+- [x] Basic multithreading (dedicated tick thread, multi-worker async runtime)
+- [ ] Fix door placement direction and hinge logic
 - [ ] Real world generation (currently flat only)
 - [ ] Sound implementation
 - [ ] Small fixes (knockback on PvP, correct damage values)

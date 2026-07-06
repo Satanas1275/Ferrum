@@ -18,6 +18,7 @@ pub struct Player {
     pub cursor_count: u8,
     pub health: f32,
     pub highest_y: f64,
+    pub sneaking: bool,
     pub sender: mpsc::UnboundedSender<Vec<u8>>,
 }
 

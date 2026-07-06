@@ -16,9 +16,9 @@ use tokio::net::TcpListener;
 
 use crate::config::ServerConfig;
 use crate::game::connection::handle_client;
-use crate::world::{SharedState, State};
+use crate::world::{SharedState, State, TpsTracker};
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> std::io::Result<()> {
     let config = ServerConfig::load();
 
@@ -28,6 +28,7 @@ async fn main() -> std::io::Result<()> {
         world: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         items: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         next_id: AtomicI32::new(1),
+        tps: tokio::sync::Mutex::new(TpsTracker::new()),
         config,
     });
 
@@ -44,31 +45,43 @@ async fn main() -> std::io::Result<()> {
 
     {
         let state = state.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(1));
-            interval.tick().await;
+        let handle = tokio::runtime::Handle::current();
+        std::thread::spawn(move || {
             loop {
-                interval.tick().await;
-                let to_remove = {
-                    let mut items = state.items.lock().await;
-                    let mut removed = Vec::new();
-                    for (&eid, item) in items.iter_mut() {
-                        item.age = item.age.saturating_add(20);
-                        if item.age >= 6000 {
-                            removed.push(eid);
+                let start = std::time::Instant::now();
+
+                handle.block_on(async {
+                    state.tps.lock().await.tick();
+
+                    let to_remove = {
+                        let mut items = state.items.lock().await;
+                        let mut removed = Vec::new();
+                        for (&eid, item) in items.iter_mut() {
+                            item.age = item.age.saturating_add(1);
+                            if item.age >= 6000 {
+                                removed.push(eid);
+                            }
+                        }
+                        for eid in &removed {
+                            items.remove(eid);
+                        }
+                        removed
+                    };
+
+                    if !to_remove.is_empty() {
+                        let destroys: Vec<Vec<u8>> = to_remove.iter().map(|eid| packets::build_destroy_entity(*eid)).collect();
+                        let players = state.players.lock().await;
+                        for (_, p) in players.iter() {
+                            for pkt in &destroys {
+                                let _ = p.sender.send(pkt.clone());
+                            }
                         }
                     }
-                    for eid in &removed {
-                        items.remove(eid);
-                    }
-                    removed
-                };
-                for eid in &to_remove {
-                    let destroy = packets::build_destroy_entity(*eid);
-                    let players = state.players.lock().await;
-                    for (_, p) in players.iter() {
-                        let _ = p.sender.send(destroy.clone());
-                    }
+                });
+
+                let elapsed = start.elapsed();
+                if let Some(sleep) = Duration::from_millis(50).checked_sub(elapsed) {
+                    std::thread::sleep(sleep);
                 }
             }
         });
