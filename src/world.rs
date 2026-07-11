@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::sync::atomic::AtomicU64;
 use std::io::Write as _;
 use std::sync::atomic::AtomicI32;
 use std::sync::Arc;
@@ -85,6 +86,9 @@ pub struct State {
     pub next_id: AtomicI32,
     pub tps: Mutex<TpsTracker>,
     pub config: ServerConfig,
+    pub redstone_queue: Mutex<VecDeque<(i32, i32, i32)>>,
+    pub redstone_delayed: Mutex<VecDeque<(u64, i32, i32, i32, u16)>>,
+    pub tick_counter: AtomicU64,
 }
 
 pub type SharedState = Arc<State>;

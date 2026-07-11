@@ -7,7 +7,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use crate::items::{self, PICKUP_DELAY_TICKS};
-use crate::net::reading::{read_packet, read_varint_buf, read_string_buf, read_f64_buf, read_f32_buf, read_i32_buf, read_i64_buf, read_u8_buf, read_i16_buf, read_slot};
+use crate::net::reading::{read_packet, read_varint_buf, read_string_buf, read_f64_buf, read_f32_buf, read_i32_buf, read_i64_buf, read_u8_buf, read_i16_buf, read_slot_full};
 use crate::net::writing::write_string;
 use crate::packets;
 use crate::player::Player;
@@ -19,10 +19,10 @@ const SPAWN_SEARCH_RADIUS: i32 = 8;
 
 fn is_interactive_block(stored: u16) -> bool {
     matches!(stored & 0xFFF,
-        23 | 25 | 26 | 54 | 58 | 61 | 62 | 64 | 69 | 71 |
-        77 | 84 | 92 | 96 | 107 | 116 | 117 | 118 | 130 |
-        137 | 138 | 143 | 144 | 145 | 146 | 154 | 158 | 167 |
-        183 | 184 | 185 | 186
+             23 | 25 | 26 | 54 | 58 | 61 | 62 | 64 | 69 | 71 |
+             77 | 84 | 92 | 96 | 107 | 116 | 117 | 118 | 130 |
+             137 | 138 | 143 | 144 | 145 | 146 | 154 | 158 | 167 |
+             183 | 184 | 185 | 186
     )
 }
 
@@ -31,8 +31,7 @@ fn toggle_block(stored: u16) -> Option<u16> {
     let meta = ((stored >> 12) & 0x0F) as u8;
     let new_meta = match block_id as u16 {
         64 | 71 | 96 | 167 | 107 | 183 | 184 | 185 | 186 => meta ^ 4,
-        69 | 143 => meta ^ 8,
-        77 => meta | 8,
+        69 | 77 | 143 => meta ^ 8,
         _ => return None,
     };
     Some(block_id | ((new_meta as u16) << 12))
@@ -44,18 +43,112 @@ fn item_to_block_id(item_id: i16) -> u16 {
         330 => 71,
         326 => 9,
         327 => 11,
+        356 => 93,
+        404 => 149,
+        355 => 26,
+        354 => 92,
+        323 => 63,
+        331 => 55,
         _ => item_id as u16,
     }
 }
 
-fn block_metadata(block_id: u16, face: u8, yaw: f32) -> u8 {
+fn is_valid_placeable_block(block_id: u16) -> bool {
+    matches!(block_id,
+             1 |  2 |  3 |  4 |  5 |  6 |  7 |
+             9 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 |
+             20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 |
+             30 | 31 | 32 | 33 | 35 |
+             37 | 38 | 39 | 40 | 41 | 42 | 43 | 44 | 45 | 46 |
+             47 | 48 | 49 | 50 | 52 | 53 | 54 | 55 | 56 | 57 |
+             58 | 60 | 61 | 63 | 64 | 65 | 66 | 67 | 68 | 69 | 70 | 71 |
+             72 | 73 | 75 | 76 | 77 | 78 | 79 | 80 | 81 | 82 |
+             83 | 84 | 85 | 86 | 87 | 88 | 89 | 91 | 92 | 93 |
+             96 | 97 | 98 | 99 | 100 | 101 | 102 | 103 |
+             106 | 107 | 108 | 109 | 110 | 111 | 112 | 113 | 114 |
+             116 | 117 | 118 | 120 | 121 | 123 |
+             125 | 126 | 128 | 129 | 130 | 131 | 133 | 134 | 135 |
+             136 | 137 | 138 | 139 | 141 | 142 | 143 | 144 | 145 |
+             146 | 147 | 148 | 149 | 151 | 152 | 153 | 154 | 155 |
+             156 | 157 | 158 | 159 | 160 | 161 | 162 | 163 | 164 |
+             165 | 167 | 168 | 169 | 170 | 171 | 172 | 173 | 174 |
+             175 | 176 | 177 | 178 | 179 | 180 | 181 | 182 | 183 |
+             184 | 185 | 186 | 187 | 188 | 189 | 190 | 191 | 192 |
+             193 | 194 | 195 | 196 | 197 | 198
+    )
+}
+
+/// Return whether the given `block_id` can be placed on the `face` of `support_block`.
+fn can_place_on(block_id: u16, face: u8, support_block: u16) -> bool {
+    let support = support_block & 0xFFF;
+    let solid = support != 0;
+    match block_id {
+        50 | 75 | 76 => (face == 1 || (2..=5).contains(&face)) && solid,
+        55 => face == 1 && solid,
+        27 | 28 | 66 | 157 => (face == 1 || (2..=5).contains(&face)) && solid,
+        65 => (2..=5).contains(&face) && solid,
+        6 => face == 1 && matches!(support, 2 | 3 | 60),
+        37 | 38 => face == 1 && matches!(support, 2 | 3 | 60),
+        39 | 40 => face == 1 && solid,
+        70 | 72 | 147 | 148 => face == 1 && solid,
+        69 | 77 | 143 => solid,
+        78 => face == 1 && solid,
+        81 => face == 1 && support == 12,
+        83 => face == 1 && matches!(support, 2 | 3 | 12),
+        106 => (2..=5).contains(&face) && solid,
+        111 => face == 1 && (support == 8 || support == 9),
+        131 => (2..=5).contains(&face) && solid,
+        171 => face == 1 && solid,
+        63 => face == 1 && solid,
+        68 => (2..=5).contains(&face) && solid,
+        _ => true,
+    }
+}
+
+fn block_metadata(block_id: u16, face: u8, yaw: f32, cursor_y: u8, damage: u8) -> u8 {
     let yaw_dir = ((yaw * 4.0 / 360.0 + 0.5).floor() as i32 & 3) as u8;
     match block_id {
+        // === Pure subtype (damage → metadata, no orientation) ===
+        5 | 35 | 159 | 171 => damage & 0x0F,
+        168 => damage & 0x03,
+        24 | 97 | 98 | 155 => damage & 0x03,
+        31 => damage & 0x03,
+        6 | 18 | 175 => damage & 0x0F,
+        160 => damage & 0x0F,
+
+        // === Slabs (subtype + top/bottom from face) ===
+        44 => (damage & 0x07) | if face == 0 { 0x08 } else { 0 },
+        126 => (damage & 0x03) | if face == 0 { 0x08 } else { 0 },
+        43 => damage & 0x07,
+        125 => damage & 0x03,
+        181 => damage & 0x07,
+        182 => (damage & 0x07) | if face == 0 { 0x08 } else { 0 },
+
+        // === Logs (subtype + orientation from face) ===
+        17 | 161 | 162 => {
+            let orientation = match face {
+                0 | 1 => 0,
+                4 | 5 => 4,
+                2 | 3 => 8,
+                _ => 0,
+            };
+            (damage & 0x03) | orientation
+        },
+        170 => match face {
+            0 | 1 => 0,
+            4 | 5 => 4,
+            2 | 3 => 8,
+            _ => 0,
+        },
+
+        // === Ladder ===
         65 => match face {
             2 | 3 | 4 | 5 => face,
             _ => 2,
         },
-        50 => match face {
+
+        // === Torch / Redstone torch ===
+        50 | 75 | 76 => match face {
             0 | 1 => 5,
             2 => 4,
             3 => 3,
@@ -63,23 +156,20 @@ fn block_metadata(block_id: u16, face: u8, yaw: f32) -> u8 {
             5 => 1,
             _ => 5,
         },
-        75 | 76 => match face {
-            0 | 1 => 5,
-            2 => 4,
-            3 => 3,
-            4 => 2,
-            5 => 1,
-            _ => 5,
-        },
+
+        // === Lever ===
+        // meta 0=ceiling, 5=floor, 1=east-wall, 2=west-wall, 3=south-wall, 4=north-wall
         69 => match face {
             0 => 0,
-            1 => 7,
-            2 => 4,
-            3 => 3,
-            4 => 2,
-            5 => 1,
+            1 => 5,
+            2 => 3,
+            3 => 4,
+            4 => 1,
+            5 => 2,
             _ => 0,
         },
+
+        // === Buttons ===
         77 | 143 => match face {
             0 => 0,
             1 => 5,
@@ -89,6 +179,8 @@ fn block_metadata(block_id: u16, face: u8, yaw: f32) -> u8 {
             5 => 1,
             _ => 0,
         },
+
+        // === Stairs ===
         53 | 67 | 108 | 109 | 114 | 128 | 134 | 135 | 136 |
         156 | 163 | 164 | 180 | 203 => {
             let stair_dir: [u8; 4] = [2, 1, 3, 0];
@@ -96,32 +188,42 @@ fn block_metadata(block_id: u16, face: u8, yaw: f32) -> u8 {
             if face == 0 { meta |= 4; }
             meta
         },
-        54 | 61 | 62 | 130 => match face {
+
+        // === Chest / Furnace / Dispenser / Dropper ===
+        54 | 61 | 62 | 130 | 23 | 158 => match face {
             2 => 2,
             3 => 3,
             4 => 5,
             5 => 4,
             _ => 2,
         },
-        33 | 34 => match face {
+
+        // === Piston / Sticky piston ===
+        29 | 33 | 34 => match face {
             0 | 1 | 2 | 3 | 4 | 5 => face,
             _ => 0,
         },
-        23 | 158 => match face {
-            0 | 1 | 2 | 3 | 4 | 5 => face,
-            _ => 0,
-        },
+
+        // === Trapdoor ===
         96 | 167 => match face {
-            0 => 8,
-            1 => 0,
-            2 => 1,
-            3 => 0,
-            4 => 3,
-            5 => 2,
+            0 | 1 => {
+                let dir = [1u8, 2, 0, 3][yaw_dir as usize];
+                if face == 0 { dir } else { dir | 8 }
+            },
+            2 => if cursor_y > 8 { 0 | 8 } else { 0 },
+            3 => if cursor_y > 8 { 1 | 8 } else { 1 },
+            4 => if cursor_y > 8 { 2 | 8 } else { 2 },
+            5 => if cursor_y > 8 { 3 | 8 } else { 3 },
             _ => 0,
         },
-         107 | 183 | 184 | 185 | 186 => yaw_dir,
-         64 | 71 => (yaw_dir + 2) & 3,
+
+        // === Fence gates ===
+        107 | 183 | 184 | 185 | 186 => yaw_dir,
+
+        // === Doors ===
+        64 | 71 => (yaw_dir + 1) & 3,
+
+        // === Bed ===
         26 => match face {
             2 => 0,
             3 => 1,
@@ -129,7 +231,166 @@ fn block_metadata(block_id: u16, face: u8, yaw: f32) -> u8 {
             5 => 3,
             _ => 0,
         },
+
+        // === Sign (standing: 16 directions via yaw; wall: face directe) ===
+        63 => {
+            ((yaw * 16.0 / 360.0 + 0.5).floor() as i32 & 15) as u8
+        },
+        68 => face,
+
+        // === Repeater / Comparator ===
+        93 | 149 => (yaw_dir + 2) & 3,
+
+        // === Rails ===
+        66 => {
+            if (2..=5).contains(&face) {
+                match face {
+                    2 => 4,
+                    3 => 5,
+                    4 => 3,
+                    5 => 2,
+                    _ => 0,
+                }
+            } else {
+                match yaw_dir {
+                    0 | 2 => 0,
+                    1 | 3 => 1,
+                    _ => 0,
+                }
+            }
+        },
+        27 | 28 | 157 => {
+            if (2..=5).contains(&face) {
+                match face {
+                    2 => 4,
+                    3 => 5,
+                    4 => 3,
+                    5 => 2,
+                    _ => 0,
+                }
+            } else {
+                match yaw_dir {
+                    0 | 2 => 0,
+                    1 | 3 => 1,
+                    _ => 0,
+                }
+            }
+        },
+
+        // === Default: no metadata (subtype blocks are handled above) ===
         _ => 0,
+    }
+}
+
+/// Check if the block at (nx, ny, nz) still has its required support.
+/// Returns `true` if it should break.
+fn lost_support(world: &std::collections::HashMap<(i32, i32, i32), u16>, nx: i32, ny: i32, nz: i32, block_id: u16, meta: u8) -> bool {
+    let support_air = |ox: i32, oy: i32, oz: i32| -> bool {
+        let b = crate::world::get_block(world, ox, oy, oz);
+        (b & 0xFFF) == 0
+    };
+    match block_id {
+        50 | 75 | 76 => {
+            if meta == 5 {
+                support_air(nx, ny - 1, nz)
+            } else {
+                let (off_x, off_z) = match meta & 0x07 {
+                    1 => (-1, 0), 2 => (1, 0), 3 => (0, -1), 4 => (0, 1),
+                    _ => (0, 0),
+                };
+                support_air(nx + off_x, ny, nz + off_z)
+            }
+        },
+        65 => {
+            let (off_x, off_z) = match meta {
+                2 => (0, 1), 3 => (0, -1), 4 => (1, 0), 5 => (-1, 0),
+                _ => (0, 0),
+            };
+            support_air(nx + off_x, ny, nz + off_z)
+        },
+        69 => {
+            match meta & 0x07 {
+                0 => support_air(nx, ny + 1, nz),
+                5 => support_air(nx, ny - 1, nz),
+                1 => support_air(nx - 1, ny, nz),
+                2 => support_air(nx + 1, ny, nz),
+                3 => support_air(nx, ny, nz - 1),
+                4 => support_air(nx, ny, nz + 1),
+                _ => false,
+            }
+        },
+        77 | 143 => {
+            match meta & 0x07 {
+                0 => support_air(nx, ny - 1, nz),
+                5 => support_air(nx, ny + 1, nz),
+                4 => support_air(nx, ny, nz + 1),
+                3 => support_air(nx, ny, nz - 1),
+                2 => support_air(nx - 1, ny, nz),
+                1 => support_air(nx + 1, ny, nz),
+                _ => false,
+            }
+        },
+        27 | 28 | 55 | 66 | 70 | 72 | 78 | 147 | 148 | 157 => {
+            ny == 0 || support_air(nx, ny - 1, nz)
+        },
+        6 | 31 | 32 | 37 | 38 | 39 | 40 => {
+            ny == 0 || {
+                let below = crate::world::get_block(world, nx, ny - 1, nz) & 0xFFF;
+                below != 2 && below != 3 && below != 60
+            }
+        },
+        81 => ny == 0 || support_air(nx, ny - 1, nz) || (crate::world::get_block(world, nx, ny - 1, nz) & 0xFFF) != 12,
+        83 => ny == 0 || support_air(nx, ny - 1, nz),
+        106 => {
+            let has_support = (2..=5).any(|side| {
+                let (ox, oz) = match side { 2 => (0, -1), 3 => (0, 1), 4 => (-1, 0), 5 => (1, 0), _ => (0, 0) };
+                crate::world::get_block(world, nx + ox, ny, nz + oz) != 0
+            });
+            !has_support
+        },
+        131 => false,
+        171 => ny == 0 || support_air(nx, ny - 1, nz),
+        _ => false,
+    }
+}
+
+pub async fn notify_neighbors(state: &crate::world::SharedState, x: i32, y: i32, z: i32) {
+    let neighbors = [
+        (x - 1, y, z), (x + 1, y, z),
+        (x, y - 1, z), (x, y + 1, z),
+        (x, y, z - 1), (x, y, z + 1),
+    ];
+    let mut to_break: Vec<(i32, i32, i32, u16)> = Vec::new();
+    let world = state.world.lock().await;
+    for &(nx, ny, nz) in &neighbors {
+        if let Some(&stored) = world.get(&(nx, ny, nz)) {
+            let block_id = stored & 0xFFF;
+            let meta = ((stored >> 12) & 0x0F) as u8;
+            if lost_support(&world, nx, ny, nz, block_id, meta) {
+                to_break.push((nx, ny, nz, stored));
+            }
+        }
+    }
+    drop(world);
+    for (bx, by, bz, stored) in to_break {
+        {
+            let mut world = state.world.lock().await;
+            world.insert((bx, by, bz), 0);
+        }
+        let pkt = crate::packets::build_block_change(bx, by as u8, bz, 0);
+        {
+            let players = state.players.lock().await;
+            for (_, player) in players.iter() {
+                let _ = player.sender.send(pkt.clone());
+            }
+        }
+        let item_id = crate::packets::block_to_item(stored);
+        if item_id >= 0 {
+            crate::items::spawn_item_entity(state, item_id, 1, 0,
+                                            bx as f64 + 0.5, by as f64 + 0.5, bz as f64 + 0.5,
+                                            0, 0, 0).await;
+        }
+        crate::game::redstone::schedule_update(state, bx, by, bz).await;
     }
 }
 
@@ -201,9 +462,9 @@ async fn handle_item_use(state: &SharedState, entity_id: i32, item_id: i16) {
 /// Retourne (x, y, z) du point trouvé.
 fn find_safe_spawn(
     world: &std::collections::HashMap<(i32, i32, i32), u16>,
-    cx: i32,
-    cz: i32,
-    default_y: i32,
+                   cx: i32,
+                   cz: i32,
+                   default_y: i32,
 ) -> (f64, f64, f64) {
     let is_free = |x: i32, y: i32, z: i32| {
         get_block(world, x, y, z) == 0 && get_block(world, x, y + 1, z) == 0
@@ -340,10 +601,10 @@ pub async fn handle_client(mut socket: TcpStream, state: SharedState) -> std::io
             && wx >= block_min && wx <= block_max
             && wz >= block_min && wz <= block_max
             && wy >= 0 && wy <= 255
-        {
-            let packet = packets::build_block_change(wx, wy as u8, wz, block_id);
-            socket.write_all(&packet).await?;
-        }
+            {
+                let packet = packets::build_block_change(wx, wy as u8, wz, block_id);
+                socket.write_all(&packet).await?;
+            }
     }
 
     // Cherche un endroit sûr pour spawn (voir find_safe_spawn : anneaux
@@ -749,11 +1010,33 @@ async fn read_loop(
                     world.insert((x, y as i32, z), 0);
                     block
                 };
-                let packet = packets::build_block_change(x, y, z, 0);
+                let mut packets = vec![packets::build_block_change(x, y, z, 0)];
+                let block_id = old_block & 0xFFF;
+                let meta = ((old_block >> 12) & 0x0F) as u8;
+                if block_id == 64 || block_id == 71 {
+                    let yi = y as i32;
+                    let other_yi = if (meta & 0x08) != 0 {
+                        yi - 1
+                    } else if yi < 255 {
+                        yi + 1
+                    } else {
+                        0
+                    };
+                    if other_yi >= 0 && other_yi <= 255 && other_yi != yi {
+                        let mut world = state.world.lock().await;
+                        world.insert((x, other_yi, z), 0);
+                        packets.push(packets::build_block_change(x, other_yi as u8, z, 0));
+                        crate::game::redstone::schedule_update(state, x, other_yi, z).await;
+                    }
+                }
+                notify_neighbors(state, x, y as i32, z).await;
+                crate::game::redstone::schedule_update(state, x, y as i32, z).await;
                 let players = state.players.lock().await;
                 for (other_id, other) in players.iter() {
-                    if *other_id != entity_id {
-                        let _ = other.sender.send(packet.clone());
+                    for pkt in &packets {
+                        if *other_id != entity_id || pkt != &packets[0] {
+                            let _ = other.sender.send(pkt.clone());
+                        }
                     }
                 }
                 if !is_creative && old_block != 0 {
@@ -779,7 +1062,10 @@ async fn read_loop(
             let y = read_u8_buf(&data, &mut idx);
             let z = read_i32_buf(&data, &mut idx);
             let face = read_u8_buf(&data, &mut idx);
-            let item_id = read_slot(&data, &mut idx);
+            let (item_id, _, damage) = read_slot_full(&data, &mut idx);
+            let _cursor_x = read_u8_buf(&data, &mut idx);
+            let cursor_y = read_u8_buf(&data, &mut idx);
+            let _cursor_z = read_u8_buf(&data, &mut idx);
 
             if face >= 6 {
                 if item_id >= 0 {
@@ -794,15 +1080,38 @@ async fn read_loop(
                     };
 
                     if is_interactive_block(clicked_block) {
-                        let mut world = state.world.lock().await;
-                        if let Some(&stored) = world.get(&(x, y as i32, z)) {
-                            if let Some(new_stored) = toggle_block(stored) {
-                                world.insert((x, y as i32, z), new_stored);
-                                let pkt = packets::build_block_change(x, y, z, new_stored);
-                                let players = state.players.lock().await;
-                                for (_, other) in players.iter() {
-                                    let _ = other.sender.send(pkt.clone());
+                        // Compute the toggle and mutate the world, then DROP the world
+                        // lock before calling notify_neighbors (which itself locks
+                        // state.world) to avoid a self-deadlock.
+                        let toggled: Option<(i32, i32, i32, u16)> = {
+                            let mut world = state.world.lock().await;
+                            if let Some(&stored) = world.get(&(x, y as i32, z)) {
+                                let block_id = stored & 0xFFF;
+                                let meta = ((stored >> 12) & 0x0F) as u8;
+                                if (block_id == 64 || block_id == 71) && (meta & 0x08) != 0 && y > 0 {
+                                    let bottom = get_block(&world, x, y as i32 - 1, z);
+                                    toggle_block(bottom).map(|new_stored| {
+                                        world.insert((x, y as i32 - 1, z), new_stored);
+                                        (x, y as i32 - 1, z, new_stored)
+                                    })
+                                } else {
+                                    toggle_block(stored).map(|new_stored| {
+                                        world.insert((x, y as i32, z), new_stored);
+                                        (x, y as i32, z, new_stored)
+                                    })
                                 }
+                            } else {
+                                None
+                            }
+                        };
+
+                        if let Some((bx, by, bz, new_stored)) = toggled {
+                            let pkt = packets::build_block_change(bx, by as u8, bz, new_stored);
+                            notify_neighbors(state, bx, by, bz).await;
+                            crate::game::redstone::schedule_update(state, bx, by, bz).await;
+                            let players = state.players.lock().await;
+                            for (_, other) in players.iter() {
+                                let _ = other.sender.send(pkt.clone());
                             }
                         }
                     } else if item_id >= 0 {
@@ -810,16 +1119,37 @@ async fn read_loop(
                             let players = state.players.lock().await;
                             players.get(&entity_id).map(|p| p.yaw).unwrap_or(0.0)
                         };
-                        let block_id = item_to_block_id(item_id);
+                        let mut block_id = item_to_block_id(item_id);
+                        if block_id == 63 && (2..=5).contains(&face) {
+                            block_id = 68;
+                        }
+                        if !is_valid_placeable_block(block_id) {
+                            let players = state.players.lock().await;
+                            if let Some(player) = players.get(&entity_id) {
+                                let _ = player.sender.send(packets::build_disconnect("{\"text\":\"Invalid block\"}"));
+                            }
+                            continue;
+                        }
+                        if !can_place_on(block_id, face, clicked_block) {
+                            continue;
+                        }
+                        {
+                            let world = state.world.lock().await;
+                            if get_block(&world, nx, ny, nz) != 0 {
+                                continue;
+                            }
+                        }
                         let is_bucket = item_id == 326 || item_id == 327;
                         let is_door = block_id == 64 || block_id == 71;
-                        let meta = block_metadata(block_id, face, yaw);
+                        let meta = block_metadata(block_id, face, yaw, cursor_y, damage as u8);
                         let stored = (block_id as u16) | ((meta as u16) << 12);
 
                         {
                             let mut world = state.world.lock().await;
                             world.insert((nx, ny, nz), stored);
                         }
+                        notify_neighbors(state, nx, ny, nz).await;
+                        crate::game::redstone::schedule_update(state, nx, ny, nz).await;
 
                         let mut packets_to_broadcast: Vec<Vec<u8>> = Vec::new();
                         packets_to_broadcast.push(packets::build_block_change(nx, ny as u8, nz, stored));
@@ -827,8 +1157,8 @@ async fn read_loop(
                         if is_door && ny < 255 {
                             let hinge_right = {
                                 let world = state.world.lock().await;
-                                let right_of = [(1i32, 0, 0), (0, 0, -1), (-1, 0, 0), (0, 0, 1)];
-                                let left_of = [(-1i32, 0, 0), (0, 0, 1), (1, 0, 0), (0, 0, -1)];
+                                let right_of = [(0i32, 0, -1), (-1, 0, 0), (0, 0, 1), (1, 0, 0)];
+                                let left_of = [(0i32, 0, 1), (1, 0, 0), (0, 0, -1), (-1, 0, 0)];
                                 let (rx, _, rz) = right_of[meta as usize];
                                 let (lx, _, lz) = left_of[meta as usize];
                                 let right = get_block(&world, nx + rx, ny, nz + rz);
@@ -842,15 +1172,15 @@ async fn read_loop(
                                 } else if left_id == 64 || left_id == 71 {
                                     let left_top = get_block(&world, nx + lx, ny + 1, nz + lz);
                                     if ((left_top >> 12) & 0x0F) as u8 & 0x01 != 0 {
-                                        false
-                                    } else {
                                         true
+                                    } else {
+                                        false
                                     }
                                 } else {
                                     true
                                 }
                             };
-                            let top_meta: u16 = if hinge_right { 0x09 } else { 0x08 };
+                            let top_meta: u16 = if hinge_right { 0x08 } else { 0x09 };
                             let top_stored = (block_id as u16) | (top_meta << 12);
                             {
                                 let mut world = state.world.lock().await;
@@ -926,9 +1256,9 @@ async fn read_loop(
                         && wx >= block_min && wx <= block_max
                         && wz >= block_min && wz <= block_max
                         && wy >= 0 && wy <= 255
-                    {
-                        block_packets.push(packets::build_block_change(wx, wy as u8, wz, block_id));
-                    }
+                        {
+                            block_packets.push(packets::build_block_change(wx, wy as u8, wz, block_id));
+                        }
                 }
 
                 let mut players = state.players.lock().await;

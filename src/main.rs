@@ -8,7 +8,7 @@ mod player;
 mod util;
 mod world;
 
-use std::sync::atomic::AtomicI32;
+use std::sync::atomic::{AtomicI32, AtomicU64};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,6 +29,9 @@ async fn main() -> std::io::Result<()> {
         items: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         next_id: AtomicI32::new(1),
         tps: tokio::sync::Mutex::new(TpsTracker::new()),
+        redstone_queue: tokio::sync::Mutex::new(std::collections::VecDeque::new()),
+        redstone_delayed: tokio::sync::Mutex::new(std::collections::VecDeque::new()),
+        tick_counter: AtomicU64::new(0),
         config,
     });
 
@@ -77,6 +80,8 @@ async fn main() -> std::io::Result<()> {
                             }
                         }
                     }
+
+                    crate::game::redstone::tick(&state).await;
                 });
 
                 let elapsed = start.elapsed();

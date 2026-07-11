@@ -92,19 +92,22 @@ pub fn read_slot(buf: &[u8], idx: &mut usize) -> i16 {
     read_slot_full(buf, idx).0
 }
 
-pub fn read_slot_full(buf: &[u8], idx: &mut usize) -> (i16, u8) {
+pub fn read_slot_full(buf: &[u8], idx: &mut usize) -> (i16, u8, i16) {
     let item_id = i16::from_be_bytes([buf[*idx], buf[*idx + 1]]);
     *idx += 2;
-    let mut count = 1u8;
-    if item_id >= 0 {
-        count = buf[*idx];
+    let (count, damage) = if item_id >= 0 {
+        let count = buf[*idx];
         *idx += 1;
+        let damage = i16::from_be_bytes([buf[*idx], buf[*idx + 1]]);
         *idx += 2;
         let nbt_len = i16::from_be_bytes([buf[*idx], buf[*idx + 1]]);
         *idx += 2;
         if nbt_len > 0 {
             *idx += nbt_len as usize;
         }
-    }
-    (item_id, count)
+        (count, damage)
+    } else {
+        (0, 0)
+    };
+    (item_id, count, damage)
 }

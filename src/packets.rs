@@ -68,9 +68,9 @@ pub fn equipment_snapshot(j: &Player) -> [(i16, i16); 5] {
 
 pub fn build_equipment_packets(entity_id: i32, j: &Player) -> Vec<Vec<u8>> {
     equipment_snapshot(j)
-        .into_iter()
-        .map(|(slot, item)| build_entity_equipment(entity_id, slot, item))
-        .collect()
+    .into_iter()
+    .map(|(slot, item)| build_entity_equipment(entity_id, slot, item))
+    .collect()
 }
 
 pub fn build_transaction_confirmation(window_id: u8, action_number: i16, accepted: bool) -> Vec<u8> {
@@ -144,7 +144,15 @@ pub fn block_to_item(stored: u16) -> i16 {
         12 => 12,
         13 => 13,
         16 => 263,
+        55 => 331,  // redstone wire (block) -> item "Redstone" (331), pas d'item id 55
         56 => 264,
+        59 => 296,  // ble en culture -> item ble (approximation, pas de gestion des graines)
+        60 => 3,    // farmland casse -> dirt
+        64 => 324,
+        71 => 330,
+        83 => 338,  // canne a sucre (block) -> item canne a sucre
+        90 => -1,   // portail : jamais de drop
+        92 => -1,   // cake (block) : pas de drop en vanilla
         _ => block_id as i16,
     }
 }
