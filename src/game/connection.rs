@@ -20,7 +20,7 @@ const SPAWN_SEARCH_RADIUS: i32 = 8;
 fn is_interactive_block(stored: u16) -> bool {
     matches!(stored & 0xFFF,
              23 | 25 | 26 | 54 | 58 | 61 | 62 | 64 | 69 | 71 |
-             77 | 84 | 92 | 96 | 107 | 116 | 117 | 118 | 130 |
+             77 | 84 | 92 | 93 | 94 | 96 | 107 | 116 | 117 | 118 | 130 |
              137 | 138 | 143 | 144 | 145 | 146 | 154 | 158 | 167 |
              183 | 184 | 185 | 186
     )
@@ -29,12 +29,26 @@ fn is_interactive_block(stored: u16) -> bool {
 fn toggle_block(stored: u16) -> Option<u16> {
     let block_id = stored & 0xFFF;
     let meta = ((stored >> 12) & 0x0F) as u8;
-    let new_meta = match block_id as u16 {
-        64 | 71 | 96 | 167 | 107 | 183 | 184 | 185 | 186 => meta ^ 4,
-        69 | 77 | 143 => meta ^ 8,
-        _ => return None,
-    };
-    Some(block_id | ((new_meta as u16) << 12))
+    match block_id as u16 {
+        64 | 71 | 96 | 167 | 107 | 183 | 184 | 185 | 186 => {
+            Some(block_id | (((meta ^ 4) as u16) << 12))
+        },
+        69 | 77 | 143 => {
+            Some(block_id | (((meta ^ 8) as u16) << 12))
+        },
+        93 | 94 => {
+            // le repeater ne "toggle" pas ici : on fait juste tourner son
+            // délai (bits 2-3, 0-3 -> 1 à 4 ticks) sans toucher à la
+            // direction (bits 0-1) ni à son état on/off (encodé dans le
+            // block id, pas dans le meta).
+            let facing = meta & 0x03;
+            let delay = (meta >> 2) & 0x03;
+            let new_delay = (delay + 1) & 0x03;
+            let new_meta = facing | (new_delay << 2);
+            Some(block_id | ((new_meta as u16) << 12))
+        },
+        _ => None,
+    }
 }
 
 fn item_to_block_id(item_id: i16) -> u16 {
@@ -105,7 +119,7 @@ fn can_place_on(block_id: u16, face: u8, support_block: u16) -> bool {
     }
 }
 
-fn block_metadata(block_id: u16, face: u8, yaw: f32, cursor_y: u8, damage: u8) -> u8 {
+fn block_metadata(block_id: u16, face: u8, yaw: f32, pitch: f32, cursor_y: u8, damage: u8) -> u8 {
     let yaw_dir = ((yaw * 4.0 / 360.0 + 0.5).floor() as i32 & 3) as u8;
     match block_id {
         // === Pure subtype (damage → metadata, no orientation) ===
@@ -199,7 +213,18 @@ fn block_metadata(block_id: u16, face: u8, yaw: f32, cursor_y: u8, damage: u8) -
         },
 
         // === Piston / Sticky piston ===
-        29 | 33 | 34 => match face {
+        // On the top of a block, a piston faces the player's horizontal
+        // direction (like stairs/trapdoors), rather than always pointing up.
+        29 | 33 => match face {
+            0 => 0,
+            1 if pitch > 45.0 => 1,
+            1 if pitch < -45.0 => 0,
+            // yaw 0/180 were inverted (south/north) in the previous map.
+            1 => [2, 5, 3, 4][yaw_dir as usize],
+            2 | 3 | 4 | 5 => face,
+            _ => 1,
+        },
+        34 => match face {
             0 | 1 | 2 | 3 | 4 | 5 => face,
             _ => 0,
         },
@@ -1029,6 +1054,46 @@ async fn read_loop(
                         crate::game::redstone::schedule_update(state, x, other_yi, z).await;
                     }
                 }
+                // The piston base and its head are one logical block.  Break
+                // either one and remove the other half as well (without a
+                // duplicate head item drop).
+                let piston_offset = |face: u8| -> (i32, i32, i32) {
+                    match face & 0x07 {
+                        0 => (0, -1, 0), 1 => (0, 1, 0),
+                        2 => (0, 0, -1), 3 => (0, 0, 1),
+                        4 => (-1, 0, 0), 5 => (1, 0, 0), _ => (0, 0, 0),
+                    }
+                };
+                if block_id == 29 || block_id == 33 {
+                    let (dx, dy, dz) = piston_offset(meta);
+                    let head = (x + dx, y as i32 + dy, z + dz);
+                    let removed_head = {
+                        let mut world = state.world.lock().await;
+                        if (get_block(&world, head.0, head.1, head.2) & 0xFFF) == 34 {
+                            world.insert(head, 0);
+                            true
+                        } else { false }
+                    };
+                    if removed_head {
+                        packets.push(packets::build_block_change(head.0, head.1 as u8, head.2, 0));
+                        crate::game::redstone::schedule_update(state, head.0, head.1, head.2).await;
+                    }
+                } else if block_id == 34 {
+                    let (dx, dy, dz) = piston_offset(meta);
+                    let base = (x - dx, y as i32 - dy, z - dz);
+                    let removed_base = {
+                        let mut world = state.world.lock().await;
+                        let candidate = get_block(&world, base.0, base.1, base.2);
+                        if matches!(candidate & 0xFFF, 29 | 33) {
+                            world.insert(base, 0);
+                            true
+                        } else { false }
+                    };
+                    if removed_base {
+                        packets.push(packets::build_block_change(base.0, base.1 as u8, base.2, 0));
+                        crate::game::redstone::schedule_update(state, base.0, base.1, base.2).await;
+                    }
+                }
                 notify_neighbors(state, x, y as i32, z).await;
                 crate::game::redstone::schedule_update(state, x, y as i32, z).await;
                 let players = state.players.lock().await;
@@ -1039,7 +1104,7 @@ async fn read_loop(
                         }
                     }
                 }
-                if !is_creative && old_block != 0 {
+                if !is_creative && old_block != 0 && block_id != 34 {
                     let item_id = packets::block_to_item(old_block);
                     if item_id >= 0 {
                         drop(players);
@@ -1109,15 +1174,27 @@ async fn read_loop(
                             let pkt = packets::build_block_change(bx, by as u8, bz, new_stored);
                             notify_neighbors(state, bx, by, bz).await;
                             crate::game::redstone::schedule_update(state, bx, by, bz).await;
+                            // Buttons are momentary switches.  The delayed
+                            // queue is also used for repeaters, so it can
+                            // restore their unpressed state without another
+                            // client action (stone: 1 s, wood: 1.5 s).
+                            let toggled_id = new_stored & 0xFFF;
+                            let toggled_meta = ((new_stored >> 12) & 0x0F) as u8;
+                            if matches!(toggled_id, 77 | 143) && (toggled_meta & 0x08) != 0 {
+                                let delay = if toggled_id == 77 { 20 } else { 30 };
+                                let due = state.tick_counter.load(Ordering::SeqCst) + delay;
+                                let released = (toggled_id as u16) | (((toggled_meta & !0x08) as u16) << 12);
+                                state.redstone_delayed.lock().await.push_back((due, bx, by, bz, released));
+                            }
                             let players = state.players.lock().await;
                             for (_, other) in players.iter() {
                                 let _ = other.sender.send(pkt.clone());
                             }
                         }
                     } else if item_id >= 0 {
-                        let yaw = {
+                        let (yaw, pitch) = {
                             let players = state.players.lock().await;
-                            players.get(&entity_id).map(|p| p.yaw).unwrap_or(0.0)
+                            players.get(&entity_id).map(|p| (p.yaw, p.pitch)).unwrap_or((0.0, 0.0))
                         };
                         let mut block_id = item_to_block_id(item_id);
                         if block_id == 63 && (2..=5).contains(&face) {
@@ -1141,7 +1218,7 @@ async fn read_loop(
                         }
                         let is_bucket = item_id == 326 || item_id == 327;
                         let is_door = block_id == 64 || block_id == 71;
-                        let meta = block_metadata(block_id, face, yaw, cursor_y, damage as u8);
+                        let meta = block_metadata(block_id, face, yaw, pitch, cursor_y, damage as u8);
                         let stored = (block_id as u16) | ((meta as u16) << 12);
 
                         {
