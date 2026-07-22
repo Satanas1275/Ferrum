@@ -30,7 +30,7 @@ pub fn build_game_mode_change(mode: u8) -> Vec<u8> {
 pub fn build_player_position_look(x: f64, y: f64, z: f64, yaw: f32, pitch: f32) -> Vec<u8> {
     let mut content = Vec::new();
     content.extend(x.to_be_bytes());
-    content.extend((y + 1.63).to_be_bytes());
+    content.extend(y.to_be_bytes());
     content.extend(z.to_be_bytes());
     content.extend(yaw.to_be_bytes());
     content.extend(pitch.to_be_bytes());
@@ -242,4 +242,15 @@ pub fn build_set_slot(window_id: u8, slot: i16, item_id: i16, count: i8, damage:
         content.extend((-1i16).to_be_bytes());
     }
     build_packet(0x2F, &mut content)
+}
+
+pub fn build_unload_chunk(cx: i32, cz: i32) -> Vec<u8> {
+    let mut content = Vec::new();
+    content.extend(cx.to_be_bytes());
+    content.extend(cz.to_be_bytes());
+    content.push(1u8);
+    content.extend((0u16).to_be_bytes());
+    content.extend((0u16).to_be_bytes());
+    content.extend((0i32).to_be_bytes());
+    build_packet(0x21, &mut content)
 }

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -11,11 +12,15 @@ use crate::net::reading::{read_packet, read_varint_buf, read_string_buf, read_f6
 use crate::net::writing::write_string;
 use crate::packets;
 use crate::player::Player;
+use crate::save;
 use crate::util::{face_offset, offline_uuid};
 use crate::world::{get_block, build_chunk_packet, SharedState};
 
 /// Rayon de recherche horizontale (en blocs) autour du point de spawn.
 const SPAWN_SEARCH_RADIUS: i32 = 8;
+
+/// Distance de vue en chunks (rayon autour du chunk du joueur).
+const VIEW_DISTANCE: i32 = 3;
 
 fn is_interactive_block(stored: u16) -> bool {
     matches!(stored & 0xFFF,
@@ -419,6 +424,83 @@ pub async fn notify_neighbors(state: &crate::world::SharedState, x: i32, y: i32,
     }
 }
 
+fn chunks_in_view(cx: i32, cz: i32, view_distance: i32) -> Vec<(i32, i32)> {
+    let mut chunks = Vec::new();
+    for dx in -view_distance..=view_distance {
+        for dz in -view_distance..=view_distance {
+            chunks.push((cx + dx, cz + dz));
+        }
+    }
+    chunks
+}
+
+async fn update_chunks_for_player(
+    state: &SharedState,
+    entity_id: i32,
+) {
+    let (player_x, player_z, sender_clone) = {
+        let players = state.players.lock().await;
+        match players.get(&entity_id) {
+            Some(p) => (p.x, p.z, p.sender.clone()),
+            None => return,
+        }
+    };
+
+    let player_cx = (player_x.floor() as i32) >> 4;
+    let player_cz = (player_z.floor() as i32) >> 4;
+
+    let desired_chunks: HashSet<(i32, i32)> = chunks_in_view(player_cx, player_cz, VIEW_DISTANCE)
+        .into_iter().collect();
+
+    let (to_load, to_unload) = {
+        let mut players = state.players.lock().await;
+        if let Some(player) = players.get_mut(&entity_id) {
+            let to_load: Vec<(i32, i32)> = desired_chunks.difference(&player.loaded_chunks).copied().collect();
+            let to_unload: Vec<(i32, i32)> = player.loaded_chunks.difference(&desired_chunks).copied().collect();
+            for chunk in &to_load {
+                player.loaded_chunks.insert(*chunk);
+            }
+            for chunk in &to_unload {
+                player.loaded_chunks.remove(chunk);
+            }
+            (to_load, to_unload)
+        } else {
+            return;
+        }
+    };
+
+    if !to_unload.is_empty() {
+        for &(cx, cz) in &to_unload {
+            let packet = packets::build_unload_chunk(cx, cz);
+            let _ = sender_clone.send(packet);
+        }
+    }
+
+    if !to_load.is_empty() {
+        let world_snapshot = state.world.lock().await.clone();
+        let block_min_x = to_load.iter().map(|(cx, _)| cx * 16).min().unwrap_or(0);
+        let block_max_x = to_load.iter().map(|(cx, _)| cx * 16 + 15).max().unwrap_or(0);
+        let block_min_z = to_load.iter().map(|(_, cz)| cz * 16).min().unwrap_or(0);
+        let block_max_z = to_load.iter().map(|(_, cz)| cz * 16 + 15).max().unwrap_or(0);
+
+        for &(cx, cz) in &to_load {
+            let pkt = build_chunk_packet(cx, cz, &world_snapshot);
+            let _ = sender_clone.send(pkt);
+        }
+
+        for (&(wx, wy, wz), &block_id) in world_snapshot.iter() {
+            if block_id != 0
+                && wx >= block_min_x && wx <= block_max_x
+                && wz >= block_min_z && wz <= block_max_z
+                && wy >= 0 && wy <= 255
+            {
+                let packet = packets::build_block_change(wx, wy as u8, wz, block_id);
+                let _ = sender_clone.send(packet);
+            }
+        }
+    }
+}
+
 fn food_heal(item_id: i16) -> f32 {
     match item_id {
         260 => 4.0,   // apple
@@ -487,6 +569,15 @@ async fn handle_item_use(state: &SharedState, entity_id: i32, item_id: i16) {
 /// Retourne (x, y, z) du point trouvé.
 fn find_safe_spawn(
     world: &std::collections::HashMap<(i32, i32, i32), u16>,
+    cx: i32,
+    cz: i32,
+    default_y: i32,
+) -> (f64, f64, f64) {
+    find_safe_spawn_inner(world, cx, cz, default_y)
+}
+
+fn find_safe_spawn_inner(
+    world: &std::collections::HashMap<(i32, i32, i32), u16>,
                    cx: i32,
                    cz: i32,
                    default_y: i32,
@@ -495,8 +586,19 @@ fn find_safe_spawn(
         get_block(world, x, y, z) == 0 && get_block(world, x, y + 1, z) == 0
     };
 
-    if is_free(cx, default_y, cz) {
-        return (cx as f64, default_y as f64, cz as f64);
+    // `default_y` suppose un monde plat (17 = juste au-dessus du sol plat de
+    // fallback). Sur un monde avec du vrai terrain (collines, grottes...),
+    // chercher à cette hauteur fixe pouvait tomber sur une poche d'air
+    // souterraine (une grotte) qui satisfait "2 blocs d'air" sans être la
+    // vraie surface -> le joueur se retrouvait enterré. On calcule d'abord la
+    // vraie hauteur du sol à la colonne (cx, cz) en scannant depuis le haut,
+    // et on part de là (surface + 1) plutôt que de faire confiance à
+    // `default_y`.
+    let surface_y = (0..256).rev().find(|&y| get_block(world, cx, y, cz) != 0);
+    let start_y = surface_y.map(|y| y + 1).unwrap_or(default_y);
+
+    if is_free(cx, start_y, cz) {
+        return (cx as f64, start_y as f64, cz as f64);
     }
 
     for radius in 1..=SPAWN_SEARCH_RADIUS {
@@ -509,8 +611,13 @@ fn find_safe_spawn(
                 }
                 let x = cx + dx;
                 let z = cz + dz;
-                if is_free(x, default_y, z) {
-                    return (x as f64, default_y as f64, z as f64);
+                // Comme pour le centre, on part de la vraie surface de CETTE
+                // colonne (x, z), pas de celle du centre ni d'une hauteur
+                // fixe, pour éviter de retomber dans une grotve/cavité.
+                let col_surface = (0..256).rev().find(|&y| get_block(world, x, y, z) != 0);
+                let y = col_surface.map(|y| y + 1).unwrap_or(start_y);
+                if is_free(x, y, z) {
+                    return (x as f64, y as f64, z as f64);
                 }
             }
         }
@@ -518,7 +625,7 @@ fn find_safe_spawn(
 
     // Rien trouvé horizontalement dans le rayon : on retombe sur l'ancien
     // comportement, remonter à la verticale sur la colonne centrale.
-    let mut y = default_y;
+    let mut y = start_y;
     loop {
         if is_free(cx, y, cz) {
             return (cx as f64, y as f64, cz as f64);
@@ -566,7 +673,7 @@ async fn send_join_game(socket: &mut TcpStream, entity_id: i32) -> std::io::Resu
 async fn send_spawn_position(socket: &mut TcpStream, spawn_x: f64, spawn_y: f64, spawn_z: f64) -> std::io::Result<()> {
     let mut content = Vec::new();
     content.extend(spawn_x.to_be_bytes());
-    content.extend((spawn_y + 0.63).to_be_bytes());
+    content.extend(spawn_y.to_be_bytes());
     content.extend(spawn_z.to_be_bytes());
     content.extend((0.0f32).to_be_bytes());
     content.extend((0.0f32).to_be_bytes());
@@ -610,64 +717,120 @@ pub async fn handle_client(mut socket: TcpStream, state: SharedState) -> std::io
     send_join_game(&mut socket, entity_id).await?;
 
     let world_snapshot = state.world.lock().await.clone();
-    let chunk_min = -2i32;
-    let chunk_max = 2i32;
-    for x in chunk_min..=chunk_max {
-        for z in chunk_min..=chunk_max {
-            let pkt = build_chunk_packet(x, z, &world_snapshot);
-            socket.write_all(&pkt).await?;
+
+    let saved_data = save::load_player(&uuid);
+    let (start_x, start_y, start_z) = if let Some(ref d) = saved_data {
+        println!("Loaded saved data for {username}");
+        // Le point sauvegardé peut avoir été enregistré enterré (ancien
+        // joueur qui a subi le bug maintenant corrigé) : on revalide qu'il y a
+        // bien 2 blocs d'air (pieds + tête) à cet endroit avant de faire
+        // confiance à la sauvegarde ; sinon on cherche le sol libre le plus
+        // proche à cette colonne (x, z), sans le téléporter ailleurs sur la
+        // carte.
+        let dx = d.x.floor() as i32;
+        let dy = d.y.floor() as i32;
+        let dz = d.z.floor() as i32;
+        let embedded = get_block(&world_snapshot, dx, dy, dz) != 0
+            || get_block(&world_snapshot, dx, dy + 1, dz) != 0;
+        if embedded {
+            println!("{username}'s saved position was embedded in terrain, correcting");
+            let (sx, sy, sz) = find_safe_spawn(&world_snapshot, dx, dz, dy);
+            (sx, sy, sz)
+        } else {
+            (d.x, d.y, d.z)
+        }
+    } else {
+        let (sx, sy, sz) = find_safe_spawn(&world_snapshot, 8, 8, 17);
+        (sx, sy, sz)
+    };
+    // HACK temporaire demandé explicitement par l'utilisateur : peu importe
+    // le chemin emprunté ci-dessus (sauvegarde ou find_safe_spawn), le
+    // joueur se retrouve systématiquement 2 blocs trop bas par rapport à ce
+    // qu'il devrait être, cause pas encore identifiée avec certitude. En
+    // attendant de la trouver, on rajoute +2 ici sur le Y, une seule fois,
+    // après que start_y a été décidé (peu importe la branche empruntée).
+    // Moche mais ça corrige le symptôme immédiatement.
+    // -> Si un jour la vraie cause est trouvée, il faudra RETIRER ce +2.0.
+    let start_y = start_y + 2.0;
+
+    let start_cx = (start_x.floor() as i32) >> 4;
+    let start_cz = (start_z.floor() as i32) >> 4;
+    let chunk_min_x = start_cx - VIEW_DISTANCE;
+    let chunk_max_x = start_cx + VIEW_DISTANCE;
+    let chunk_min_z = start_cz - VIEW_DISTANCE;
+    let chunk_max_z = start_cz + VIEW_DISTANCE;
+    let initial_chunks: HashSet<(i32, i32)> = (chunk_min_x..=chunk_max_x)
+        .flat_map(|x| (chunk_min_z..=chunk_max_z).map(move |z| (x, z)))
+        .collect();
+
+    // Le chunk du joueur (celui sous ses pieds) part en premier, tout seul,
+    // suivi immédiatement de sa position. Avant, les 49 chunks partaient dans
+    // un ordre arbitraire (min->max) puis SEULEMENT ENSUITE la position ;
+    // le client pouvait se retrouver à traiter sa propre position avant que
+    // son propre chunk soit posé, ou avec des chunks voisins sans le sien -> il
+    // tombe dans le vide le temps que tout arrive, puis tout se stabilise d'un
+    // coup (effet "reload").
+    let own_chunk_pkt = build_chunk_packet(start_cx, start_cz, &world_snapshot);
+    socket.write_all(&own_chunk_pkt).await?;
+    send_spawn_position(&mut socket, start_x, start_y, start_z).await?;
+
+    let mut remaining_chunks_buf = Vec::new();
+    for cx in chunk_min_x..=chunk_max_x {
+        for cz in chunk_min_z..=chunk_max_z {
+            if cx == start_cx && cz == start_cz {
+                continue; // déjà envoyé au-dessus
+            }
+            let pkt = build_chunk_packet(cx, cz, &world_snapshot);
+            remaining_chunks_buf.extend(pkt);
         }
     }
+    socket.write_all(&remaining_chunks_buf).await?;
 
-    let block_min = chunk_min * 16;
-    let block_max = chunk_max * 16 + 15;
-    for (&(wx, wy, wz), &block_id) in world_snapshot.iter() {
-        if block_id != 0
-            && wx >= block_min && wx <= block_max
-            && wz >= block_min && wz <= block_max
-            && wy >= 0 && wy <= 255
-            {
-                let packet = packets::build_block_change(wx, wy as u8, wz, block_id);
-                socket.write_all(&packet).await?;
-            }
-    }
-
-    // Cherche un endroit sûr pour spawn (voir find_safe_spawn : anneaux
-    // horizontaux d'abord, fallback vertical seulement si tout le rayon
-    // est bloqué)
-    let (spawn_x, spawn_y, spawn_z) = find_safe_spawn(&world_snapshot, 8, 8, 17);
-
-    send_spawn_position(&mut socket, spawn_x, spawn_y, spawn_z).await?;
     println!("{username} is now online!");
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
+    let (start_yaw, start_pitch, start_gamemode, start_health, start_inv, start_cnt, start_sel, start_cur_item, start_cur_cnt) = if let Some(ref d) = saved_data {
+        (d.yaw, d.pitch, d.gamemode, d.health, d.inventory, d.counts, d.selected_slot, d.cursor_item, d.cursor_count)
+    } else {
+        (0.0, 0.0, 1u8, 20.0, [-1i16; 45], [0u8; 45], 0usize, -1i16, 0u8)
+    };
 
     let new_player = Player {
         entity_id,
         uuid: uuid.clone(),
         username: username.clone(),
-        x: spawn_x,
-        y: spawn_y,
-        z: spawn_z,
-        yaw: 0.0,
-        pitch: 0.0,
-        gamemode: 1,
-        inventory: [-1i16; 45],
-        counts: [0u8; 45],
-        selected_slot: 0,
-        cursor_item: -1,
-        cursor_count: 0,
-        health: 20.0,
-        highest_y: spawn_y,
+        x: start_x,
+        y: start_y,
+        z: start_z,
+        yaw: start_yaw,
+        pitch: start_pitch,
+        gamemode: start_gamemode,
+        inventory: start_inv,
+        counts: start_cnt,
+        selected_slot: start_sel,
+        cursor_item: start_cur_item,
+        cursor_count: start_cur_cnt,
+        health: start_health,
+        highest_y: start_y,
         sneaking: false,
         sender: tx.clone(),
+        loaded_chunks: initial_chunks,
     };
 
     let (mut reader, mut writer) = socket.into_split();
 
     tokio::spawn(async move {
         while let Some(packet) = rx.recv().await {
-            if writer.write_all(&packet).await.is_err() {
+            // On regroupe tout ce qui est déjà en attente dans le channel (ex:
+            // une rafale de chunks/block-changes envoyée par
+            // update_chunks_for_player) en un seul write, plutôt qu'un
+            // write_all par paquet.
+            let mut batch = packet;
+            while let Ok(more) = rx.try_recv() {
+                batch.extend(more);
+            }
+            if writer.write_all(&batch).await.is_err() {
                 break;
             }
         }
@@ -694,6 +857,20 @@ pub async fn handle_client(mut socket: TcpStream, state: SharedState) -> std::io
         let _ = tx.send(list_packet);
 
         players.insert(entity_id, new_player);
+    }
+
+    {
+        let players = state.players.lock().await;
+        if let Some(player) = players.get(&entity_id) {
+            for i in 0..45 {
+                if player.inventory[i] >= 0 {
+                    let pkt = packets::build_set_slot(0, i as i16, player.inventory[i], player.counts[i] as i8, 0);
+                    let _ = tx.send(pkt);
+                }
+            }
+            let _ = tx.send(packets::build_update_health(player.health, 20i16, 0.0));
+            let _ = tx.send(packets::build_game_mode_change(player.gamemode));
+        }
     }
 
     {
@@ -791,6 +968,13 @@ pub async fn handle_client(mut socket: TcpStream, state: SharedState) -> std::io
 
     {
         let mut players = state.players.lock().await;
+        if let Some(player) = players.get(&entity_id) {
+            if let Err(e) = save::save_player(player) {
+                println!("Error saving player {}: {e}", player.username);
+            } else {
+                println!("Saved player data for {}", player.username);
+            }
+        }
         players.remove(&entity_id);
 
         let list_packet = packets::build_player_list_item(&username, false);
@@ -871,7 +1055,10 @@ async fn read_loop(
                     }
                 }
             }
+            drop(players);
+            update_chunks_for_player(state, entity_id).await;
             if just_injured {
+                let players = state.players.lock().await;
                 let (is_dead, health_packet) = {
                     let player = &players[&entity_id];
                     (player.health <= 0.0, packets::build_update_health(player.health, 20i16, 0.0))
@@ -1315,27 +1502,42 @@ async fn read_loop(
             let mut idx = 0;
             let action = read_u8_buf(&data, &mut idx);
             if action == 0 {
+                // Le client 1.7.10 envoie ce paquet (Client Status, action 0)
+                // À CHAQUE connexion, pas seulement après une vraie mort (voir
+                // wiki.vg Protocol FAQ : "Client Status: sent either before or
+                // while receiving chunks"). Sans ce garde-fou, tout join
+                // déclenchait un faux respawn vers le point fixe (8,8) avec
+                // l'astuce de double changement de dimension (pour forcer un
+                // reload de chunks côté client) -> c'est ça qui causait le
+                // déchargement/rechargement du monde juste après le join, la
+                // téléportation vers (8,8) même en jouant ailleurs, et le fait
+                // de se retrouver enterré (find_safe_spawn rappelé par-dessus
+                // le spawn déjà correct fait au login).
+                let is_actually_dead = {
+                    let players = state.players.lock().await;
+                    players.get(&entity_id).map(|p| p.health <= 0.0).unwrap_or(false)
+                };
+                if is_actually_dead {
                 let world_snapshot = state.world.lock().await.clone();
                 let (spawn_x, spawn_y, spawn_z) = find_safe_spawn(&world_snapshot, 8, 8, 17);
 
-                let mut chunk_packets: Vec<Vec<u8>> = Vec::with_capacity(25);
-                for x in -2..=2 {
-                    for z in -2..=2 {
-                        chunk_packets.push(build_chunk_packet(x, z, &world_snapshot));
-                    }
-                }
-
-                let block_min = -2 * 16;
-                let block_max = 2 * 16 + 15;
-                let mut block_packets: Vec<Vec<u8>> = Vec::new();
-                for (&(wx, wy, wz), &block_id) in world_snapshot.iter() {
-                    if block_id != 0
-                        && wx >= block_min && wx <= block_max
-                        && wz >= block_min && wz <= block_max
-                        && wy >= 0 && wy <= 255
-                        {
-                            block_packets.push(packets::build_block_change(wx, wy as u8, wz, block_id));
+                let spawn_cx = (spawn_x.floor() as i32) >> 4;
+                let spawn_cz = (spawn_z.floor() as i32) >> 4;
+                let rmin_x = spawn_cx - VIEW_DISTANCE;
+                let rmax_x = spawn_cx + VIEW_DISTANCE;
+                let rmin_z = spawn_cz - VIEW_DISTANCE;
+                let rmax_z = spawn_cz + VIEW_DISTANCE;
+                // Même principe qu'au join : son propre chunk + sa position en
+                // premier, le reste après (voir commentaire au join plus haut).
+                let own_chunk_pkt = build_chunk_packet(spawn_cx, spawn_cz, &world_snapshot);
+                let mut chunk_packets: Vec<Vec<u8>> = Vec::new();
+                for cx in rmin_x..=rmax_x {
+                    for cz in rmin_z..=rmax_z {
+                        if cx == spawn_cx && cz == spawn_cz {
+                            continue;
                         }
+                        chunk_packets.push(build_chunk_packet(cx, cz, &world_snapshot));
+                    }
                 }
 
                 let mut players = state.players.lock().await;
@@ -1348,16 +1550,15 @@ async fn read_loop(
                     player.y = spawn_y;
                     player.z = spawn_z;
                     player.highest_y = spawn_y;
+                    player.loaded_chunks = (rmin_x..=rmax_x).flat_map(|x| (rmin_z..=rmax_z).map(move |z| (x, z))).collect();
                     let fake_dim = if gamemode == 1 { -1 } else { 1 };
                     let _ = sender.send(packets::build_respawn(fake_dim, 1, gamemode));
                     let _ = sender.send(packets::build_respawn(0, 1, gamemode));
+                    let _ = sender.send(own_chunk_pkt);
+                    let _ = sender.send(packets::build_player_position_look(spawn_x, spawn_y, spawn_z, 0.0, 0.0));
                     for pkt in &chunk_packets {
                         let _ = sender.send(pkt.clone());
                     }
-                    for pkt in &block_packets {
-                        let _ = sender.send(pkt.clone());
-                    }
-                    let _ = sender.send(packets::build_player_position_look(spawn_x, spawn_y, spawn_z, 0.0, 0.0));
                     let _ = sender.send(packets::build_update_health(20.0, 20i16, 0.0));
                     let destroy = packets::build_destroy_entity(entity_id);
                     let spawn = packets::build_spawn_player(player);
@@ -1367,6 +1568,10 @@ async fn read_loop(
                             let _ = other.sender.send(spawn.clone());
                         }
                     }
+                    let _ = sender.send(packets::build_player_list_item(&spawn_username, true));
+                }
+                if let Some(player) = players.get(&entity_id) {
+                    let sender = player.sender.clone();
                     for (other_id, other) in players.iter() {
                         if *other_id != entity_id {
                             let _ = sender.send(packets::build_player_list_item(&other.username, true));
@@ -1377,7 +1582,7 @@ async fn read_loop(
                             let _ = sender.send(packets::build_entity_metadata_flags(other.entity_id, other.sneaking));
                         }
                     }
-                    let _ = sender.send(packets::build_player_list_item(&spawn_username, true));
+                }
                 }
             }
         }

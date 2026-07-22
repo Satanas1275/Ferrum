@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use crate::game::commands::teleport_entity;
 use crate::packets;
+use crate::save;
 use crate::util::{get_process_ram_mb, parse_rel_coord};
 use crate::world::SharedState;
 
@@ -21,7 +22,7 @@ impl Completer for ConsoleHelper {
         _pos: usize,
         _ctx: &rustyline::Context<'_>,
     ) -> rustyline::Result<(usize, Vec<String>)> {
-        let cmds = ["help", "list", "say", "stop", "gamemode", "tp", "teleport", "tps", "load"];
+        let cmds = ["help", "list", "say", "stop", "save-all", "gamemode", "tp", "teleport", "tps", "load"];
         let trimmed = line.trim();
         let completions: Vec<String> = cmds.iter()
             .filter(|c| c.starts_with(trimmed))
@@ -48,6 +49,7 @@ async fn handle_console_command(parts: &[&str], state: &SharedState) {
             println!("  tp <player> <target>        - Teleport to player");
             println!("  list                        - List online players");
             println!("  say <message>               - Broadcast a message");
+            println!("  save-all                    - Save world and players");
             println!("  stop                        - Shutdown server");
             println!("  tps                         - Show ticks per second");
             println!("  load                        - Show RAM and CPU usage");
@@ -72,6 +74,25 @@ async fn handle_console_command(parts: &[&str], state: &SharedState) {
             }
         }
         "stop" => {
+            println!("Saving world...");
+            {
+                let blocks = state.world.lock().await.clone();
+                match save::save_all_chunks(&blocks) {
+                    Ok(_) => println!("World saved ({} blocks)", blocks.len()),
+                    Err(e) => println!("Error saving world: {e}"),
+                }
+                let players = state.players.lock().await;
+                let mut saved = 0;
+                for (_, player) in players.iter() {
+                    if save::save_player(player).is_ok() {
+                        saved += 1;
+                    }
+                }
+                drop(players);
+                if saved > 0 {
+                    println!("Saved {saved} players");
+                }
+            }
             println!("Shutting down server...");
             let reason = r#"{"text":"Server shutting down","color":"red"}"#;
             let packet = packets::build_disconnect(reason);
@@ -82,6 +103,23 @@ async fn handle_console_command(parts: &[&str], state: &SharedState) {
             drop(players);
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             std::process::exit(0);
+        }
+        "save-all" => {
+            println!("Saving world...");
+            let blocks = state.world.lock().await.clone();
+            match save::save_all_chunks(&blocks) {
+                Ok(_) => println!("World saved ({} blocks)", blocks.len()),
+                Err(e) => println!("Error saving world: {e}"),
+            }
+            let players = state.players.lock().await;
+            let mut saved = 0;
+            for (_, player) in players.iter() {
+                if save::save_player(player).is_ok() {
+                    saved += 1;
+                }
+            }
+            drop(players);
+            println!("Saved {saved} players");
         }
         "gamemode" => {
             if parts.len() >= 2 {

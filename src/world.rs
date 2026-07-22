@@ -104,9 +104,27 @@ pub fn get_block(world: &HashMap<(i32, i32, i32), u16>, x: i32, y: i32, z: i32) 
 }
 
 pub fn compute_heightmap(world: &HashMap<(i32, i32, i32), u16>, chunk_x: i32, chunk_z: i32) -> [[i32; 16]; 16] {
+    compute_heightmap_and_sections(world, chunk_x, chunk_z).0
+}
+
+/// Calcule la heightmap ET le nombre de sections en un seul passage.
+///
+/// Avant ce fix, `build_chunk_packet` appelait `compute_heightmap` (65536
+/// lookups dans la hashmap du monde) PUIS `chunk_section_count` qui refaisait
+/// exactement le même balayage colonne par colonne (encore 65536 lookups) rien
+/// que pour connaître la hauteur max. Pour un simple join avec un rayon de vue
+/// de 3 chunks (49 chunks), ça fait ~6.4M lookups de hashmap rien que pour ces
+/// deux scans redondants, avant même de générer le contenu des sections -> gros
+/// contributeur au "downloading terrain" qui traîne en longueur.
+pub fn compute_heightmap_and_sections(
+    world: &HashMap<(i32, i32, i32), u16>,
+    chunk_x: i32,
+    chunk_z: i32,
+) -> ([[i32; 16]; 16], usize) {
     let mut heights = [[-1i32; 16]; 16];
     let base_x = chunk_x * 16;
     let base_z = chunk_z * 16;
+    let mut max_y = 0i32;
     for lx in 0..16 {
         for lz in 0..16 {
             let wx = base_x + lx as i32;
@@ -114,12 +132,14 @@ pub fn compute_heightmap(world: &HashMap<(i32, i32, i32), u16>, chunk_x: i32, ch
             for y in (0..256).rev() {
                 if get_block(world, wx, y, wz) != 0 {
                     heights[lx][lz] = y;
+                    max_y = max_y.max(y);
                     break;
                 }
             }
         }
     }
-    heights
+    let num_sections = (max_y / 16 + 1).clamp(1, 16) as usize;
+    (heights, num_sections)
 }
 
 pub fn pack_nibbles(values: &[u8; 4096]) -> Vec<u8> {
@@ -137,7 +157,7 @@ pub fn generate_section(
     chunk_x: i32,
     chunk_z: i32,
     section_y: i32,
-) -> Vec<u8> {
+) -> ([u8; 4096], [u8; 4096], [u8; 4096]) {
     let mut block_data = [0u8; 4096];
     let mut block_meta = [0u8; 4096];
     let mut sky_light = [0u8; 4096];
@@ -158,14 +178,10 @@ pub fn generate_section(
             }
         }
     }
-    let mut data = Vec::new();
-    data.extend(block_data);
-    data.extend(pack_nibbles(&block_meta));
-    data.extend(vec![0u8; 2048]);
-    data.extend(pack_nibbles(&sky_light));
-    data
+    (block_data, block_meta, sky_light)
 }
 
+#[allow(dead_code)] // remplacée par compute_heightmap_and_sections (scan unique)
 pub fn chunk_section_count(world: &HashMap<(i32, i32, i32), u16>, chunk_x: i32, chunk_z: i32) -> usize {
     let base_x = chunk_x * 16;
     let base_z = chunk_z * 16;
@@ -186,11 +202,33 @@ pub fn chunk_section_count(world: &HashMap<(i32, i32, i32), u16>, chunk_x: i32, 
 }
 
 pub fn build_chunk_packet(chunk_x: i32, chunk_z: i32, world: &HashMap<(i32, i32, i32), u16>) -> Vec<u8> {
-    let num_sections = chunk_section_count(world, chunk_x, chunk_z);
-    let heights = compute_heightmap(world, chunk_x, chunk_z);
-    let mut raw_data = Vec::new();
+    let (heights, num_sections) = compute_heightmap_and_sections(world, chunk_x, chunk_z);
+
+    // Le format 1.7.10 range les tableaux PAR TYPE à travers toutes les
+    // sections (tous les block IDs de toutes les sections, PUIS toutes les
+    // métadonnées, PUIS toute la block light, PUIS toute la sky light) - pas
+    // section par section. Avec une seule section (couches 0-15, le cas le
+    // plus courant) les deux ordres donnent le même résultat, ce qui masquait
+    // le bug ; dès qu'une 2e section existe (quelque chose au-dessus de la
+    // couche 15), l'ancien ordre (groupé par section) désynchronisait tout ce
+    // qui suit -> plus rien au-dessus de la couche 15 ne s'affichait.
+    let mut sections = Vec::with_capacity(num_sections);
     for s in 0..num_sections {
-        raw_data.extend(generate_section(world, &heights, chunk_x, chunk_z, s as i32));
+        sections.push(generate_section(world, &heights, chunk_x, chunk_z, s as i32));
+    }
+
+    let mut raw_data = Vec::new();
+    for (blocks, _, _) in &sections {
+        raw_data.extend(blocks);
+    }
+    for (_, meta, _) in &sections {
+        raw_data.extend(pack_nibbles(meta));
+    }
+    for _ in &sections {
+        raw_data.extend(vec![0u8; 2048]); // block light (non géré, toujours 0)
+    }
+    for (_, _, sky) in &sections {
+        raw_data.extend(pack_nibbles(sky));
     }
     raw_data.extend(vec![1u8; 256]);
 
@@ -202,7 +240,7 @@ pub fn build_chunk_packet(chunk_x: i32, chunk_z: i32, world: &HashMap<(i32, i32,
     content.extend(chunk_x.to_be_bytes());
     content.extend(chunk_z.to_be_bytes());
     content.push(1u8);
-    let primary_bitmap = ((1u16 << num_sections) - 1) as u16;
+    let primary_bitmap = if num_sections >= 16 { 0xFFFFu16 } else { ((1u16 << num_sections) - 1) as u16 };
     content.extend(primary_bitmap.to_be_bytes());
     content.extend((0u16).to_be_bytes());
     content.extend((compressed_data.len() as i32).to_be_bytes());

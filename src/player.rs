@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use tokio::sync::mpsc;
 
 #[derive(Clone)]
@@ -20,6 +21,7 @@ pub struct Player {
     pub highest_y: f64,
     pub sneaking: bool,
     pub sender: mpsc::UnboundedSender<Vec<u8>>,
+    pub loaded_chunks: HashSet<(i32, i32)>,
 }
 
 impl Player {
