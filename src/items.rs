@@ -15,7 +15,7 @@ pub struct ItemEntity {
     pub age: u16,
 }
 
-pub async fn spawn_item_entity(
+pub fn spawn_item_entity(
     state: &SharedState,
     item_id: i16,
     count: i8,
@@ -39,12 +39,12 @@ pub async fn spawn_item_entity(
         age: 0,
     };
 
-    state.items.lock().await.insert(entity_id, item);
+    state.items.lock().unwrap().insert(entity_id, item);
 
     let spawn_packet = packets::build_spawn_item(entity_id, item_id, x, y, z, vel_x, vel_y, vel_z);
     let metadata_packet = packets::build_item_metadata(entity_id, item_id, count, damage);
 
-    let players = state.players.lock().await;
+    let players = state.players.lock().unwrap();
     for (_, player) in players.iter() {
         let _ = player.sender.send(spawn_packet.clone());
         let _ = player.sender.send(metadata_packet.clone());

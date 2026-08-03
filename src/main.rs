@@ -36,13 +36,13 @@ async fn main() -> std::io::Result<()> {
 
     let port = config.port;
     let state: SharedState = Arc::new(State {
-        players: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-        world: tokio::sync::Mutex::new(loaded_world),
-        items: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        players: std::sync::Mutex::new(std::collections::HashMap::new()),
+        world: std::sync::Mutex::new(loaded_world),
+        items: std::sync::Mutex::new(std::collections::HashMap::new()),
         next_id: AtomicI32::new(1),
-        tps: tokio::sync::Mutex::new(TpsTracker::new()),
-        redstone_queue: tokio::sync::Mutex::new(std::collections::VecDeque::new()),
-        redstone_delayed: tokio::sync::Mutex::new(std::collections::VecDeque::new()),
+        tps: std::sync::Mutex::new(TpsTracker::new()),
+        redstone_queue: std::sync::Mutex::new(std::collections::VecDeque::new()),
+        redstone_delayed: std::sync::Mutex::new(std::collections::VecDeque::new()),
         tick_counter: AtomicU64::new(0),
         config,
     });
@@ -54,8 +54,7 @@ async fn main() -> std::io::Result<()> {
 
     {
         let state = state.clone();
-        let handle = tokio::runtime::Handle::current();
-        std::thread::spawn(move || console::console_loop(state, handle));
+        std::thread::spawn(move || console::console_loop(state));
     }
 
     {
@@ -65,12 +64,12 @@ async fn main() -> std::io::Result<()> {
             interval.tick().await;
             loop {
                 interval.tick().await;
-                let blocks = state.world.lock().await.clone();
+                let blocks = state.world.lock().unwrap().clone();
                 match save::save_all_chunks(&blocks) {
                     Ok(_) => println!("[AUTOSAVE] World saved ({} blocks)", blocks.len()),
                     Err(e) => println!("[AUTOSAVE] Error saving world: {e}"),
                 }
-                let players = state.players.lock().await;
+                let players = state.players.lock().unwrap();
                 let mut saved = 0;
                 for (_, player) in players.iter() {
                     if save::save_player(player).is_ok() {
@@ -87,41 +86,38 @@ async fn main() -> std::io::Result<()> {
 
     {
         let state = state.clone();
-        let handle = tokio::runtime::Handle::current();
         std::thread::spawn(move || {
             loop {
                 let start = std::time::Instant::now();
 
-                handle.block_on(async {
-                    state.tps.lock().await.tick();
+                state.tps.lock().unwrap().tick();
 
-                    let to_remove = {
-                        let mut items = state.items.lock().await;
-                        let mut removed = Vec::new();
-                        for (&eid, item) in items.iter_mut() {
-                            item.age = item.age.saturating_add(1);
-                            if item.age >= 6000 {
-                                removed.push(eid);
-                            }
-                        }
-                        for eid in &removed {
-                            items.remove(eid);
-                        }
-                        removed
-                    };
-
-                    if !to_remove.is_empty() {
-                        let destroys: Vec<Vec<u8>> = to_remove.iter().map(|eid| packets::build_destroy_entity(*eid)).collect();
-                        let players = state.players.lock().await;
-                        for (_, p) in players.iter() {
-                            for pkt in &destroys {
-                                let _ = p.sender.send(pkt.clone());
-                            }
+                let to_remove = {
+                    let mut items = state.items.lock().unwrap();
+                    let mut removed = Vec::new();
+                    for (&eid, item) in items.iter_mut() {
+                        item.age = item.age.saturating_add(1);
+                        if item.age >= 6000 {
+                            removed.push(eid);
                         }
                     }
+                    for eid in &removed {
+                        items.remove(eid);
+                    }
+                    removed
+                };
 
-                    crate::game::redstone::tick(&state).await;
-                });
+                if !to_remove.is_empty() {
+                    let destroys: Vec<Vec<u8>> = to_remove.iter().map(|eid| packets::build_destroy_entity(*eid)).collect();
+                    let players = state.players.lock().unwrap();
+                    for (_, p) in players.iter() {
+                        for pkt in &destroys {
+                            let _ = p.sender.send(pkt.clone());
+                        }
+                    }
+                }
+
+                crate::game::redstone::tick(&state);
 
                 let elapsed = start.elapsed();
                 if let Some(sleep) = Duration::from_millis(50).checked_sub(elapsed) {

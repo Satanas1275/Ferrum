@@ -4,10 +4,10 @@ use crate::packets;
 use crate::util::{get_process_ram_mb, parse_rel_coord};
 use crate::world::SharedState;
 
-pub async fn teleport_entity(entity_id: i32, x: f64, y: f64, z: f64, yaw: f32, pitch: f32, state: &SharedState) {
+pub fn teleport_entity(entity_id: i32, x: f64, y: f64, z: f64, yaw: f32, pitch: f32, state: &SharedState) {
     let packet_view = packets::build_entity_teleport_pos(entity_id, x, y, z, yaw, pitch);
     let packet_self = packets::build_player_position_look(x, y, z, yaw, pitch);
-    let mut players = state.players.lock().await;
+    let mut players = state.players.lock().unwrap();
     if let Some(player) = players.get_mut(&entity_id) {
         player.x = x;
         player.y = y;
@@ -23,7 +23,7 @@ pub async fn teleport_entity(entity_id: i32, x: f64, y: f64, z: f64, yaw: f32, p
     }
 }
 
-pub async fn handle_player_command(state: &SharedState, entity_id: i32, message: &str) {
+pub fn handle_player_command(state: &SharedState, entity_id: i32, message: &str) {
     let parts: Vec<&str> = message.split_whitespace().collect();
     let command = parts[0];
     match command {
@@ -38,7 +38,7 @@ pub async fn handle_player_command(state: &SharedState, entity_id: i32, message:
                 };
                 if mode <= 3 {
                     let mode_packet = packets::build_game_mode_change(mode);
-                    let mut players = state.players.lock().await;
+                    let mut players = state.players.lock().unwrap();
                     if let Some(player) = players.get_mut(&entity_id) {
                         player.gamemode = mode;
                         let _ = player.sender.send(mode_packet);
@@ -51,7 +51,7 @@ pub async fn handle_player_command(state: &SharedState, entity_id: i32, message:
                 "§cUsage: /gamemode <mode>".to_string()
             };
             let packet = packets::build_chat(&format!("{{\"text\":\"{response}\"}}"));
-            let players = state.players.lock().await;
+            let players = state.players.lock().unwrap();
             if let Some(player) = players.get(&entity_id) {
                 let _ = player.sender.send(packet);
             }
@@ -64,7 +64,7 @@ pub async fn handle_player_command(state: &SharedState, entity_id: i32, message:
                 "§f/load §7- Show RAM and CPU usage",
                 "§f/help §7- This help",
             ];
-            let players = state.players.lock().await;
+            let players = state.players.lock().unwrap();
             if let Some(player) = players.get(&entity_id) {
                 for line in lines {
                     let packet = packets::build_chat(&format!("{{\"text\":\"{line}\"}}"));
@@ -76,12 +76,12 @@ pub async fn handle_player_command(state: &SharedState, entity_id: i32, message:
             let response = if parts.len() == 2 {
                 let dest_name = parts[1];
                 let dest = {
-                    let players = state.players.lock().await;
+                    let players = state.players.lock().unwrap();
                     players.values().find(|p| p.username == dest_name)
                         .map(|p| (p.x, p.y, p.z, p.yaw, p.pitch))
                 };
                 if let Some((dx, dy, dz, dyaw, dpitch)) = dest {
-                    teleport_entity(entity_id, dx, dy, dz, dyaw, dpitch, state).await;
+                    teleport_entity(entity_id, dx, dy, dz, dyaw, dpitch, state);
                     format!("§aTeleported to §f{dest_name}")
                 } else {
                     format!("§cPlayer '{dest_name}' not found")
@@ -90,7 +90,7 @@ pub async fn handle_player_command(state: &SharedState, entity_id: i32, message:
                 let target_name = parts[1];
                 let dest_name = parts[2];
                 let (target_ids, dest_pos) = {
-                    let players = state.players.lock().await;
+                    let players = state.players.lock().unwrap();
                     let ids: Vec<i32> = if target_name == "@a" {
                         players.keys().copied().collect()
                     } else {
@@ -102,7 +102,7 @@ pub async fn handle_player_command(state: &SharedState, entity_id: i32, message:
                 };
                 if let Some((dx, dy, dz, dyaw, dpitch)) = dest_pos {
                     for id in &target_ids {
-                        teleport_entity(*id, dx, dy, dz, dyaw, dpitch, state).await;
+                        teleport_entity(*id, dx, dy, dz, dyaw, dpitch, state);
                     }
                     if target_name == "@a" {
                         format!("§aAll players teleported to §f{dest_name}")
@@ -113,13 +113,13 @@ pub async fn handle_player_command(state: &SharedState, entity_id: i32, message:
                     format!("§cPlayer '{dest_name}' not found")
                 }
             } else if parts.len() == 4 {
-                let players = state.players.lock().await;
+                let players = state.players.lock().unwrap();
                 let response = if let Some(player) = players.get(&entity_id) {
                     let cx = player.x; let cy = player.y; let cz = player.z;
                     drop(players);
                     match (parse_rel_coord(&parts[1], cx), parse_rel_coord(&parts[2], cy), parse_rel_coord(&parts[3], cz)) {
                         (Some(x), Some(y), Some(z)) => {
-                            teleport_entity(entity_id, x, y, z, 0.0, 0.0, state).await;
+                            teleport_entity(entity_id, x, y, z, 0.0, 0.0, state);
                             format!("§aTeleported to §f({x:.1}, {y:.1}, {z:.1})")
                         }
                         _ => "§cInvalid coordinates".to_string(),
@@ -130,7 +130,7 @@ pub async fn handle_player_command(state: &SharedState, entity_id: i32, message:
                 response
             } else if parts.len() == 5 {
                 let (target_str, x_str, y_str, z_str) = (parts[1], parts[2], parts[3], parts[4]);
-                let players = state.players.lock().await;
+                let players = state.players.lock().unwrap();
                 let response = if target_str == "@a" {
                     let cx = players.values().next().map(|p| p.x).unwrap_or(0.0);
                     let cy = players.values().next().map(|p| p.y).unwrap_or(0.0);
@@ -140,7 +140,7 @@ pub async fn handle_player_command(state: &SharedState, entity_id: i32, message:
                     match (parse_rel_coord(x_str, cx), parse_rel_coord(y_str, cy), parse_rel_coord(z_str, cz)) {
                         (Some(x), Some(y), Some(z)) => {
                             for id in &ids {
-                                teleport_entity(*id, x, y, z, 0.0, 0.0, state).await;
+                                teleport_entity(*id, x, y, z, 0.0, 0.0, state);
                             }
                             format!("§aAll teleported to §f({x:.1}, {y:.1}, {z:.1})")
                         }
@@ -152,7 +152,7 @@ pub async fn handle_player_command(state: &SharedState, entity_id: i32, message:
                     drop(players);
                     match (parse_rel_coord(x_str, cx), parse_rel_coord(y_str, cy), parse_rel_coord(z_str, cz)) {
                         (Some(x), Some(y), Some(z)) => {
-                            teleport_entity(target_id, x, y, z, 0.0, 0.0, state).await;
+                            teleport_entity(target_id, x, y, z, 0.0, 0.0, state);
                             format!("§a{target_str} teleported to §f({x:.1}, {y:.1}, {z:.1})")
                         }
                         _ => "§cInvalid coordinates".to_string(),
@@ -165,13 +165,13 @@ pub async fn handle_player_command(state: &SharedState, entity_id: i32, message:
                 "§cUsage: /tp <x> <y> <z> or /tp <player> <x> <y> <z> or /tp <player> <target>".to_string()
             };
             let packet = packets::build_chat(&format!("{{\"text\":\"{response}\"}}"));
-            let players = state.players.lock().await;
+            let players = state.players.lock().unwrap();
             if let Some(player) = players.get(&entity_id) {
                 let _ = player.sender.send(packet);
             }
         }
         "/tps" => {
-            let tps = state.tps.lock().await;
+            let tps = state.tps.lock().unwrap();
             let tps_5s = tps.tps(Duration::from_secs(5));
             let tps_30s = tps.tps(Duration::from_secs(30));
             let tps_5min = tps.tps(Duration::from_secs(300));
@@ -183,7 +183,7 @@ pub async fn handle_player_command(state: &SharedState, entity_id: i32, message:
                 format!("§6TPS (5m):   §f{tps_5min:.1}"),
                 format!("§6TPS (15m):  §f{tps_15min:.1}"),
             ];
-            let players = state.players.lock().await;
+            let players = state.players.lock().unwrap();
             if let Some(player) = players.get(&entity_id) {
                 for line in &lines {
                     let packet = packets::build_chat(&format!("{{\"text\":\"{line}\"}}"));
@@ -193,12 +193,12 @@ pub async fn handle_player_command(state: &SharedState, entity_id: i32, message:
         }
         "/load" => {
             let ram = get_process_ram_mb();
-            let cpu = state.tps.lock().await.cpu();
+            let cpu = state.tps.lock().unwrap().cpu();
             let lines = vec![
                 format!("§6RAM: §f{ram:.1} MB"),
                 format!("§6CPU: §f{cpu:.1}%"),
             ];
-            let players = state.players.lock().await;
+            let players = state.players.lock().unwrap();
             if let Some(player) = players.get(&entity_id) {
                 for line in &lines {
                     let packet = packets::build_chat(&format!("{{\"text\":\"{line}\"}}"));
@@ -209,7 +209,7 @@ pub async fn handle_player_command(state: &SharedState, entity_id: i32, message:
         _ => {
             let response = format!("§cUnknown command: {}", command);
             let packet = packets::build_chat(&format!("{{\"text\":\"{response}\"}}"));
-            let players = state.players.lock().await;
+            let players = state.players.lock().unwrap();
             if let Some(player) = players.get(&entity_id) {
                 let _ = player.sender.send(packet);
             }

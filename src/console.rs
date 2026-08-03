@@ -37,7 +37,7 @@ impl Hinter for ConsoleHelper { type Hint = String; }
 impl Validator for ConsoleHelper {}
 impl Helper for ConsoleHelper {}
 
-async fn handle_console_command(parts: &[&str], state: &SharedState) {
+fn handle_console_command(parts: &[&str], state: &SharedState) {
     if parts.is_empty() { return; }
     let raw = parts[0].strip_prefix('/').unwrap_or(parts[0]);
     let command = raw;
@@ -55,7 +55,7 @@ async fn handle_console_command(parts: &[&str], state: &SharedState) {
             println!("  load                        - Show RAM and CPU usage");
         }
         "list" => {
-            let players = state.players.lock().await;
+            let players = state.players.lock().unwrap();
             let names: Vec<String> = players.values().map(|p| p.username.clone()).collect();
             println!("Online players ({}/{}): {}", names.len(), state.config.max_players, names.join(", "));
         }
@@ -64,7 +64,7 @@ async fn handle_console_command(parts: &[&str], state: &SharedState) {
                 let msg = parts[1..].join(" ");
                 let json = format!(r#"{{"text":"[Server] {msg}","color":"gold"}}"#);
                 let packet = packets::build_chat(&json);
-                let players = state.players.lock().await;
+                let players = state.players.lock().unwrap();
                 for (_, p) in players.iter() {
                     let _ = p.sender.send(packet.clone());
                 }
@@ -76,12 +76,12 @@ async fn handle_console_command(parts: &[&str], state: &SharedState) {
         "stop" => {
             println!("Saving world...");
             {
-                let blocks = state.world.lock().await.clone();
+                let blocks = state.world.lock().unwrap().clone();
                 match save::save_all_chunks(&blocks) {
                     Ok(_) => println!("World saved ({} blocks)", blocks.len()),
                     Err(e) => println!("Error saving world: {e}"),
                 }
-                let players = state.players.lock().await;
+                let players = state.players.lock().unwrap();
                 let mut saved = 0;
                 for (_, player) in players.iter() {
                     if save::save_player(player).is_ok() {
@@ -96,22 +96,22 @@ async fn handle_console_command(parts: &[&str], state: &SharedState) {
             println!("Shutting down server...");
             let reason = r#"{"text":"Server shutting down","color":"red"}"#;
             let packet = packets::build_disconnect(reason);
-            let players = state.players.lock().await;
+            let players = state.players.lock().unwrap();
             for (_, p) in players.iter() {
                 let _ = p.sender.send(packet.clone());
             }
             drop(players);
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            std::thread::sleep(std::time::Duration::from_millis(200));
             std::process::exit(0);
         }
         "save-all" => {
             println!("Saving world...");
-            let blocks = state.world.lock().await.clone();
+            let blocks = state.world.lock().unwrap().clone();
             match save::save_all_chunks(&blocks) {
                 Ok(_) => println!("World saved ({} blocks)", blocks.len()),
                 Err(e) => println!("Error saving world: {e}"),
             }
-            let players = state.players.lock().await;
+            let players = state.players.lock().unwrap();
             let mut saved = 0;
             for (_, player) in players.iter() {
                 if save::save_player(player).is_ok() {
@@ -136,7 +136,7 @@ async fn handle_console_command(parts: &[&str], state: &SharedState) {
                 }
                 let player_name = if parts.len() >= 3 { Some(parts[2]) } else { None };
                 let mode_packet = packets::build_game_mode_change(mode);
-                let mut players = state.players.lock().await;
+                let mut players = state.players.lock().unwrap();
                 let targets: Vec<i32> = if let Some(name) = player_name {
                     players.values().filter(|p| p.username == name).map(|p| p.entity_id).collect()
                 } else {
@@ -162,13 +162,13 @@ async fn handle_console_command(parts: &[&str], state: &SharedState) {
             if parts.len() == 3 {
                 let target_name = parts[1];
                 let dest_name = parts[2];
-                let players_lock = state.players.lock().await;
+                let players_lock = state.players.lock().unwrap();
                 let target_id = players_lock.values().find(|p| p.username == target_name).map(|p| p.entity_id);
                 let dest_pos = players_lock.values().find(|p| p.username == dest_name).map(|p| (p.x, p.y, p.z, p.yaw, p.pitch));
                 drop(players_lock);
                 if let Some(id) = target_id {
                     if let Some((dx, dy, dz, dyaw, dpitch)) = dest_pos {
-                        teleport_entity(id, dx, dy, dz, dyaw, dpitch, state).await;
+                        teleport_entity(id, dx, dy, dz, dyaw, dpitch, state);
                         println!("Teleported {target_name} to {dest_name}");
                     } else {
                         println!("Player '{dest_name}' not found");
@@ -178,7 +178,7 @@ async fn handle_console_command(parts: &[&str], state: &SharedState) {
                 }
             } else if parts.len() == 4 {
                 let target_name = parts[1];
-                let players_lock = state.players.lock().await;
+                let players_lock = state.players.lock().unwrap();
                 let target = players_lock.values().find(|p| p.username == target_name).map(|p| (p.entity_id, p.x, p.y, p.z));
                 drop(players_lock);
                 if let Some((id, cx, cy, cz)) = target {
@@ -187,7 +187,7 @@ async fn handle_console_command(parts: &[&str], state: &SharedState) {
                         parse_rel_coord(parts[3], cy),
                         parse_rel_coord(parts[4], cz),
                     ) {
-                        teleport_entity(id, x, y, z, 0.0, 0.0, state).await;
+                        teleport_entity(id, x, y, z, 0.0, 0.0, state);
                         println!("Teleported {target_name} to ({x:.1}, {y:.1}, {z:.1})");
                     } else {
                         println!("Invalid coordinates");
@@ -200,7 +200,7 @@ async fn handle_console_command(parts: &[&str], state: &SharedState) {
             }
         }
         "tps" => {
-            let tps = state.tps.lock().await;
+            let tps = state.tps.lock().unwrap();
             let tps_5s = tps.tps(Duration::from_secs(5));
             let tps_30s = tps.tps(Duration::from_secs(30));
             let tps_5min = tps.tps(Duration::from_secs(300));
@@ -213,7 +213,7 @@ async fn handle_console_command(parts: &[&str], state: &SharedState) {
         }
         "load" => {
             let ram = get_process_ram_mb();
-            let cpu = state.tps.lock().await.cpu();
+            let cpu = state.tps.lock().unwrap().cpu();
             println!("RAM: {ram:.1} MB");
             println!("CPU: {cpu:.1}%");
         }
@@ -223,7 +223,7 @@ async fn handle_console_command(parts: &[&str], state: &SharedState) {
     }
 }
 
-pub fn console_loop(state: SharedState, handle: tokio::runtime::Handle) {
+pub fn console_loop(state: SharedState) {
     let mut rl = match rustyline::Editor::<ConsoleHelper, rustyline::history::DefaultHistory>::new() {
         Ok(editor) => editor,
         Err(e) => { eprintln!("Console error: {e}"); return; }
@@ -237,7 +237,7 @@ pub fn console_loop(state: SharedState, handle: tokio::runtime::Handle) {
                 if trimmed.is_empty() { continue; }
                 let _ = rl.add_history_entry(trimmed);
                 let parts: Vec<&str> = trimmed.split_whitespace().collect();
-                handle.block_on(handle_console_command(&parts, &state));
+                handle_console_command(&parts, &state);
             }
             Err(rustyline::error::ReadlineError::Interrupted)
             | Err(rustyline::error::ReadlineError::Eof) => {

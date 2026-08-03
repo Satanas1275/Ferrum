@@ -22,6 +22,12 @@ pub struct Player {
     pub sneaking: bool,
     pub sender: mpsc::UnboundedSender<Vec<u8>>,
     pub loaded_chunks: HashSet<(i32, i32)>,
+    pub last_bcast_x: i32,
+    pub last_bcast_y: i32,
+    pub last_bcast_z: i32,
+    pub last_bcast_yaw: u8,
+    pub last_bcast_pitch: u8,
+    pub last_chunk: (i32, i32),
 }
 
 impl Player {

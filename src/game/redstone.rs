@@ -220,24 +220,24 @@ fn is_redstone_relevant(block: u16) -> bool {
     )
 }
 
-async fn send_block_update(state: &SharedState, x: i32, y: i32, z: i32, stored: u16) {
+fn send_block_update(state: &SharedState, x: i32, y: i32, z: i32, stored: u16) {
     let pkt = packets::build_block_change(x, y as u8, z, stored);
-    let players = state.players.lock().await;
+    let players = state.players.lock().unwrap();
     for (_, p) in players.iter() {
         let _ = p.sender.send(pkt.clone());
     }
 }
 
-pub async fn schedule_update(state: &SharedState, x: i32, y: i32, z: i32) {
-    let mut queue = state.redstone_queue.lock().await;
+pub fn schedule_update(state: &SharedState, x: i32, y: i32, z: i32) {
+    let mut queue = state.redstone_queue.lock().unwrap();
     if !queue.contains(&(x, y, z)) {
         queue.push_back((x, y, z));
     }
 }
 
 /// Check if a block is powered by any adjacent redstone component
-async fn is_block_powered_by_neighbor(state: &SharedState, x: i32, y: i32, z: i32) -> bool {
-    let world = state.world.lock().await;
+fn is_block_powered_by_neighbor(state: &SharedState, x: i32, y: i32, z: i32) -> bool {
+    let world = state.world.lock().unwrap();
     let result = is_block_powered(&world, x, y, z);
     drop(world);
     result
@@ -265,14 +265,14 @@ async fn is_block_powered_by_neighbor(state: &SharedState, x: i32, y: i32, z: i3
 /// sources encore actives. Comme on ne touche qu'aux fils déjà allumés
 /// (meta > 0), cette passe ne fait rien du tout quand on allume un circuit
 /// (aucun flicker dans ce cas).
-async fn reset_dust_network(state: &SharedState, seeds: &[(i32, i32, i32)]) -> Vec<(i32, i32, i32)> {
+fn reset_dust_network(state: &SharedState, seeds: &[(i32, i32, i32)]) -> Vec<(i32, i32, i32)> {
     let mut to_visit: VecDeque<(i32, i32, i32)> = VecDeque::new();
     let mut seen: Vec<(i32, i32, i32)> = Vec::new();
     let mut reset_list: Vec<(i32, i32, i32)> = Vec::new();
 
     for &(x, y, z) in seeds {
         let stored = {
-            let world = state.world.lock().await;
+            let world = state.world.lock().unwrap();
             get_block(&world, x, y, z)
         };
         let block = block_id(stored);
@@ -319,13 +319,13 @@ async fn reset_dust_network(state: &SharedState, seeds: &[(i32, i32, i32)]) -> V
         seen.push((x, y, z));
 
         let stored = {
-            let world = state.world.lock().await;
+            let world = state.world.lock().unwrap();
             get_block(&world, x, y, z)
         };
         if block_id(stored) != 55 || meta(stored) == 0 { continue; }
 
         {
-            let mut world = state.world.lock().await;
+            let mut world = state.world.lock().unwrap();
             world.insert((x, y, z), encode(55, 0));
         }
         reset_list.push((x, y, z));
@@ -351,20 +351,20 @@ async fn reset_dust_network(state: &SharedState, seeds: &[(i32, i32, i32)]) -> V
     reset_list
 }
 
-pub async fn tick(state: &SharedState) {
+pub fn tick(state: &SharedState) {
     let tick = state.tick_counter.fetch_add(1, Ordering::SeqCst);
 
     // Pressure plates are sources while a player's feet occupy their block.
     // Store the normal client metadata (0/1), while exposing full redstone
     // power through `get_block_power` above.
     let occupied: HashSet<(i32, i32, i32)> = {
-        let players = state.players.lock().await;
+        let players = state.players.lock().unwrap();
         players.values().map(|p| {
             (p.x.floor() as i32, (p.y - 1.0).floor() as i32, p.z.floor() as i32)
         }).collect()
     };
     let plate_changes: Vec<(i32, i32, i32, u16)> = {
-        let mut world = state.world.lock().await;
+        let mut world = state.world.lock().unwrap();
         let positions: Vec<(i32, i32, i32)> = world.iter()
             .filter_map(|(&(x, y, z), &stored)| matches!(block_id(stored), 70 | 72 | 147 | 148).then_some((x, y, z)))
             .collect();
@@ -381,32 +381,32 @@ pub async fn tick(state: &SharedState) {
         changes
     };
     for &(x, y, z, stored) in &plate_changes {
-        send_block_update(state, x, y, z, stored).await;
-        schedule_update(state, x, y, z).await;
+        send_block_update(state, x, y, z, stored);
+        schedule_update(state, x, y, z);
     }
 
     // process delayed events (repeaters)
     {
-        let mut delayed = state.redstone_delayed.lock().await;
+        let mut delayed = state.redstone_delayed.lock().unwrap();
         while let Some(front) = delayed.front() {
             if front.0 <= tick {
                 let (_, x, y, z, stored) = delayed.pop_front().unwrap();
                 let pkt = packets::build_block_change(x, y as u8, z, stored);
                 {
-                    let mut world = state.world.lock().await;
+                    let mut world = state.world.lock().unwrap();
                     world.insert((x, y, z), stored);
                 }
-                let players = state.players.lock().await;
+                let players = state.players.lock().unwrap();
                 for (_, p) in players.iter() {
                     let _ = p.sender.send(pkt.clone());
                 }
                 drop(players);
-                crate::game::connection::notify_neighbors(state, x, y, z).await;
+                crate::game::connection::notify_neighbors(state, x, y, z);
                 // Repartir du repeater lui-même : `reset_dust_network` sait qu'un
                 // composant directionnel ne peut remettre à zéro que sa sortie.
                 // En ajoutant directement ses six voisins ici, le fil à l'entrée
                 // devenait une graine du reset et s'éteignait à chaque bascule.
-                let mut queue = state.redstone_queue.lock().await;
+                let mut queue = state.redstone_queue.lock().unwrap();
                 if !queue.contains(&(x, y, z)) {
                     queue.push_back((x, y, z));
                 }
@@ -420,17 +420,17 @@ pub async fn tick(state: &SharedState) {
     let mut queue: VecDeque<(i32, i32, i32)>;
 
     {
-        let mut shared = state.redstone_queue.lock().await;
+        let mut shared = state.redstone_queue.lock().unwrap();
         queue = shared.drain(..).collect();
     }
 
     // Phase de reset : neutralise les valeurs périmées avant de re-propager
     // (voir doc de reset_dust_network ci-dessus).
     let seeds: Vec<(i32, i32, i32)> = queue.iter().cloned().collect();
-    let reset_positions = reset_dust_network(state, &seeds).await;
+    let reset_positions = reset_dust_network(state, &seeds);
     let reset_dust: HashSet<(i32, i32, i32)> = reset_positions.iter().copied().collect();
     for &(x, y, z) in &reset_positions {
-        send_block_update(state, x, y, z, encode(55, 0)).await;
+        send_block_update(state, x, y, z, encode(55, 0));
         if !queue.contains(&(x, y, z)) {
             queue.push_back((x, y, z));
         }
@@ -448,7 +448,7 @@ pub async fn tick(state: &SharedState) {
             // A dust node may need another pass when a neighbour was
             // recomputed later in the same tick.  Other components are still
             // handled once to avoid feedback loops.
-            let world = state.world.lock().await;
+            let world = state.world.lock().unwrap();
             let is_dust = block_id(get_block(&world, x, y, z)) == 55;
             drop(world);
             if !is_dust { continue; }
@@ -456,7 +456,7 @@ pub async fn tick(state: &SharedState) {
             visited.push((x, y, z));
         }
 
-        let world = state.world.lock().await;
+        let world = state.world.lock().unwrap();
         let stored = get_block(&world, x, y, z);
         if stored == 0 {
             // La suppression d'un fil est elle aussi un changement de signal :
@@ -468,7 +468,7 @@ pub async fn tick(state: &SharedState) {
                 if visited.contains(&(nx, ny, nz)) || queue.contains(&(nx, ny, nz)) {
                     continue;
                 }
-                let world = state.world.lock().await;
+                let world = state.world.lock().unwrap();
                 let neighbor = block_id(get_block(&world, nx, ny, nz));
                 drop(world);
                 if is_redstone_relevant(neighbor) {
@@ -490,10 +490,10 @@ pub async fn tick(state: &SharedState) {
                 drop(world);
                 if new_block != block {
                     let ns = encode(new_block, m);
-                    let mut world = state.world.lock().await;
+                    let mut world = state.world.lock().unwrap();
                     world.insert((x, y, z), ns);
                     drop(world);
-                    send_block_update(state, x, y, z, ns).await;
+                    send_block_update(state, x, y, z, ns);
                 }
             } else {
                 drop(world);
@@ -583,11 +583,11 @@ pub async fn tick(state: &SharedState) {
             || matches!(block, 69 | 70 | 72 | 77 | 143 | 147 | 148 | 152);
         if let Some(ns) = new_stored {
             {
-                let mut world = state.world.lock().await;
+                let mut world = state.world.lock().unwrap();
                 world.insert((x, y, z), ns);
             }
-            send_block_update(state, x, y, z, ns).await;
-            crate::game::connection::notify_neighbors(state, x, y, z).await;
+            send_block_update(state, x, y, z, ns);
+            crate::game::connection::notify_neighbors(state, x, y, z);
         }
 
         // A reset writes dust to zero before this loop runs.  Treat it as a
@@ -595,13 +595,13 @@ pub async fn tick(state: &SharedState) {
         if changed || reset_dust.contains(&(x, y, z)) {
             // collect actuations (batch write to avoid redundant work)
             for (nx, ny, nz) in [(x-1,y,z),(x+1,y,z),(x,y-1,z),(x,y+1,z),(x,y,z-1),(x,y,z+1)] {
-                let world = state.world.lock().await;
+                let world = state.world.lock().unwrap();
                 let neighbor = get_block(&world, nx, ny, nz);
                 let nb = block_id(neighbor);
                 let nm = meta(neighbor);
                 drop(world);
                 if matches!(nb, 64 | 71 | 96 | 107 | 167 | 183 | 184 | 185 | 186 | 123 | 124 | 29 | 33 | 27 | 28 | 157 | 25) {
-                    let powered = is_block_powered_by_neighbor(state, nx, ny, nz).await;
+                    let powered = is_block_powered_by_neighbor(state, nx, ny, nz);
                     match nb {
                         64 | 71 | 96 | 107 | 167 | 183 | 184 | 185 | 186 => {
                             let open = (nm & 0x04) != 0;
@@ -609,7 +609,7 @@ pub async fn tick(state: &SharedState) {
                                 let new_nm = if powered { nm | 0x04 } else { nm & !0x04 };
                                 pending_actuations.push((nx, ny, nz, encode(nb, new_nm)));
                                 if (nb == 64 || nb == 71) && (nm & 0x08) == 0 && ny < 255 {
-                                    let world = state.world.lock().await;
+                                    let world = state.world.lock().unwrap();
                                     let top = get_block(&world, nx, ny + 1, nz);
                                     drop(world);
                                     if block_id(top) == nb {
@@ -643,14 +643,14 @@ pub async fn tick(state: &SharedState) {
         }
 
         if let Some((target_tick, ns)) = schedule_delayed {
-            let mut delayed = state.redstone_delayed.lock().await;
+            let mut delayed = state.redstone_delayed.lock().unwrap();
             delayed.push_back((target_tick, x, y, z, ns));
         }
 
         // propagate to direct neighbors
         for (nx, ny, nz) in [(x-1,y,z),(x+1,y,z),(x,y-1,z),(x,y+1,z),(x,y,z-1),(x,y,z+1)] {
             if queue.contains(&(nx, ny, nz)) { continue; }
-            let world = state.world.lock().await;
+            let world = state.world.lock().unwrap();
             let nb = block_id(get_block(&world, nx, ny, nz));
             drop(world);
             if visited.contains(&(nx, ny, nz)) && !(changed && nb == 55) { continue; }
@@ -664,7 +664,7 @@ pub async fn tick(state: &SharedState) {
         // needs to be notified of power changes in the opaque block
         for (nx, ny, nz) in [(x-1,y,z),(x+1,y,z),(x,y-1,z),(x,y+1,z),(x,y,z-1),(x,y,z+1)] {
             if visited.contains(&(nx, ny, nz)) || queue.contains(&(nx, ny, nz)) { continue; }
-            let world = state.world.lock().await;
+            let world = state.world.lock().unwrap();
             let nb = block_id(get_block(&world, nx, ny, nz));
             drop(world);
             if !is_opaque(nb) { continue; }
@@ -672,7 +672,7 @@ pub async fn tick(state: &SharedState) {
             for (tx, ty, tz) in [(nx-1,ny,nz),(nx+1,ny,nz),(nx,ny-1,nz),(nx,ny+1,nz),(nx,ny,nz-1),(nx,ny,nz+1)] {
                 if tx == x && ty == y && tz == z { continue; }
                 if visited.contains(&(tx, ty, tz)) || queue.contains(&(tx, ty, tz)) { continue; }
-                let world = state.world.lock().await;
+                let world = state.world.lock().unwrap();
                 let tb = block_id(get_block(&world, tx, ty, tz));
                 drop(world);
                 if is_redstone_relevant(tb) {
@@ -686,7 +686,7 @@ pub async fn tick(state: &SharedState) {
     // their head is a real block (34), and the block in front is moved.
     let mut block_updates = pending_actuations.clone();
     {
-        let mut world = state.world.lock().await;
+        let mut world = state.world.lock().unwrap();
         for &(x, y, z, ns) in &pending_actuations {
             world.insert((x, y, z), ns);
 
@@ -754,8 +754,8 @@ pub async fn tick(state: &SharedState) {
         }
     }
     for &(x, y, z, ns) in &block_updates {
-        send_block_update(state, x, y, z, ns).await;
-        crate::game::connection::notify_neighbors(state, x, y, z).await;
+        send_block_update(state, x, y, z, ns);
+        crate::game::connection::notify_neighbors(state, x, y, z);
         // Lamps, pistons, doors, etc. are passive consumers.  Scheduling the
         // dust around each visual/mechanical state change feeds the reset
         // pass again and makes a lamp oscillate forever.  Rails are the only
@@ -763,7 +763,7 @@ pub async fn tick(state: &SharedState) {
         if !matches!(block_id(ns), 27 | 28 | 157) {
             continue;
         }
-        let mut queue = state.redstone_queue.lock().await;
+        let mut queue = state.redstone_queue.lock().unwrap();
         for (nx, ny, nz) in [(x-1,y,z),(x+1,y,z),(x,y-1,z),(x,y+1,z),(x,y,z-1),(x,y,z+1)] {
             if !queue.contains(&(nx, ny, nz)) {
                 queue.push_back((nx, ny, nz));

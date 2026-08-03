@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
-use tokio::sync::Mutex;
+use std::sync::Mutex;
 
 use crate::config::ServerConfig;
 use crate::items::ItemEntity;
@@ -101,6 +101,35 @@ pub fn get_block(world: &HashMap<(i32, i32, i32), u16>, x: i32, y: i32, z: i32) 
     } else {
         0
     }
+}
+
+/// Extrait un "snapshot" compact des blocs stockés explicitement (b != 0)
+/// situés dans le carré de chunks de rayon `radius` autour de (cx, cz).
+///
+/// Contrairement à `world.clone()` (copie de TOUT le monde à chaque join ou
+/// changement de chunk), on ne copie ici que les blocs réellement présents
+/// dans la zone vue — ce qui est tout ce dont `build_chunk_packet` et
+/// `find_safe_spawn` ont besoin (`get_block` synthétise le sol plat y <= 15).
+pub fn extract_view_snapshot(
+    world: &HashMap<(i32, i32, i32), u16>,
+    cx: i32,
+    cz: i32,
+    radius: i32,
+) -> HashMap<(i32, i32, i32), u16> {
+    let min_cx = cx - radius;
+    let max_cx = cx + radius;
+    let min_cz = cz - radius;
+    let max_cz = cz + radius;
+    let mut m = HashMap::new();
+    for (&(x, y, z), &b) in world.iter() {
+        if b == 0 { continue; }
+        let bcx = x >> 4;
+        let bcz = z >> 4;
+        if bcx >= min_cx && bcx <= max_cx && bcz >= min_cz && bcz <= max_cz && y >= 0 && y <= 255 {
+            m.insert((x, y, z), b);
+        }
+    }
+    m
 }
 
 pub fn compute_heightmap(world: &HashMap<(i32, i32, i32), u16>, chunk_x: i32, chunk_z: i32) -> [[i32; 16]; 16] {
@@ -217,7 +246,7 @@ pub fn build_chunk_packet(chunk_x: i32, chunk_z: i32, world: &HashMap<(i32, i32,
         sections.push(generate_section(world, &heights, chunk_x, chunk_z, s as i32));
     }
 
-    let mut raw_data = Vec::new();
+    let mut raw_data = Vec::with_capacity(num_sections * 4096 + num_sections * 2048 * 3 + 256);
     for (blocks, _, _) in &sections {
         raw_data.extend(blocks);
     }
@@ -225,18 +254,21 @@ pub fn build_chunk_packet(chunk_x: i32, chunk_z: i32, world: &HashMap<(i32, i32,
         raw_data.extend(pack_nibbles(meta));
     }
     for _ in &sections {
-        raw_data.extend(vec![0u8; 2048]); // block light (non géré, toujours 0)
+        raw_data.resize(raw_data.len() + 2048, 0); // block light (non géré, toujours 0)
     }
     for (_, _, sky) in &sections {
         raw_data.extend(pack_nibbles(sky));
     }
-    raw_data.extend(vec![1u8; 256]);
+    raw_data.resize(raw_data.len() + 256, 1);
 
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    // Compression rapide : le niveau 6 par défaut coûte cher en CPU au moment
+    // du join/chargement des chunks ; le niveau 1 est bien assez compressé
+    // pour des données Minecraft et beaucoup plus rapide.
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
     encoder.write_all(&raw_data).expect("compress chunk");
     let compressed_data = encoder.finish().expect("finish compression");
 
-    let mut content = Vec::new();
+    let mut content = Vec::with_capacity(4 + 4 + 1 + 2 + 2 + 4 + compressed_data.len());
     content.extend(chunk_x.to_be_bytes());
     content.extend(chunk_z.to_be_bytes());
     content.push(1u8);

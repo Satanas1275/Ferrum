@@ -2,15 +2,15 @@ use crate::items;
 use crate::packets;
 use crate::world::SharedState;
 
-pub async fn broadcast_equipment(state: &SharedState, entity_id: i32) {
+pub fn broadcast_equipment(state: &SharedState, entity_id: i32) {
     let packets = {
-        let players = state.players.lock().await;
+        let players = state.players.lock().unwrap();
         match players.get(&entity_id) {
             Some(player) => packets::build_equipment_packets(entity_id, player),
             None => return,
         }
     };
-    let players = state.players.lock().await;
+    let players = state.players.lock().unwrap();
     for (other_id, other) in players.iter() {
         if *other_id != entity_id {
             for pkt in &packets {
@@ -20,7 +20,7 @@ pub async fn broadcast_equipment(state: &SharedState, entity_id: i32) {
     }
 }
 
-pub async fn handle_click_window(state: &SharedState, entity_id: i32, data: &[u8]) {
+pub fn handle_click_window(state: &SharedState, entity_id: i32, data: &[u8]) {
     let mut idx = 0;
     let window_id = data[idx]; idx += 1;
     let slot = i16::from_be_bytes([data[idx], data[idx + 1]]); idx += 2;
@@ -39,7 +39,7 @@ pub async fn handle_click_window(state: &SharedState, entity_id: i32, data: &[u8
     if window_id != 0 { return; }
 
     let click_result: Option<(Vec<(i16, i16, i8)>, Option<(i16, i8, f64, f64, f64, i16, i16, i16)>)> = {
-        let mut players = state.players.lock().await;
+        let mut players = state.players.lock().unwrap();
         if let Some(player) = players.get_mut(&entity_id) {
             let mut changed: Vec<(i16, i16, i8)> = Vec::new();
             let mut drop_item: Option<(i16, i8, f64, f64, f64, i16, i16, i16)> = None;
@@ -240,7 +240,7 @@ pub async fn handle_click_window(state: &SharedState, entity_id: i32, data: &[u8
 
     if let Some((changed, drop_item)) = click_result {
         {
-            let players = state.players.lock().await;
+            let players = state.players.lock().unwrap();
             if let Some(player) = players.get(&entity_id) {
                 for &(s, iid, cnt) in &changed {
                     let pkt = packets::build_set_slot(window_id, s, iid, cnt, 0);
@@ -249,13 +249,13 @@ pub async fn handle_click_window(state: &SharedState, entity_id: i32, data: &[u8
             }
         }
         if let Some((iid, cnt, px, py, pz, vx, vy, vz)) = drop_item {
-            items::spawn_item_entity(state, iid, cnt, 0, px, py, pz, vx, vy, vz).await;
+            items::spawn_item_entity(state, iid, cnt, 0, px, py, pz, vx, vy, vz);
         }
-        broadcast_equipment(state, entity_id).await;
+        broadcast_equipment(state, entity_id);
     }
 }
 
-pub async fn handle_creative_inventory(state: &SharedState, entity_id: i32, data: &[u8]) {
+pub fn handle_creative_inventory(state: &SharedState, entity_id: i32, data: &[u8]) {
     let mut idx = 0;
     let slot = i16::from_be_bytes([data[idx], data[idx + 1]]); idx += 2;
     let (item_id, count) = {
@@ -268,29 +268,29 @@ pub async fn handle_creative_inventory(state: &SharedState, entity_id: i32, data
     };
 
     let is_creative = {
-        let players = state.players.lock().await;
+        let players = state.players.lock().unwrap();
         players.get(&entity_id).map(|p| p.gamemode == 1).unwrap_or(false)
     };
     if !is_creative { return; }
 
     if slot == -999 && item_id >= 0 {
         let player_pos = {
-            let players = state.players.lock().await;
+            let players = state.players.lock().unwrap();
             players.get(&entity_id).map(|p| (p.x, p.y, p.z))
         };
         if let Some((px, py, pz)) = player_pos {
-            items::spawn_item_entity(state, item_id, count as i8, 0, px, py, pz, 0, 0, 0).await;
+            items::spawn_item_entity(state, item_id, count as i8, 0, px, py, pz, 0, 0, 0);
         }
     } else if slot >= 0 && (slot as usize) < 45 {
-        let mut players = state.players.lock().await;
+        let mut players = state.players.lock().unwrap();
         if let Some(player) = players.get_mut(&entity_id) {
             player.inventory[slot as usize] = item_id;
             player.counts[slot as usize] = if item_id >= 0 { count } else { 0 };
         }
         drop(players);
-        broadcast_equipment(state, entity_id).await;
+        broadcast_equipment(state, entity_id);
     } else if slot == -1 {
-        let mut players = state.players.lock().await;
+        let mut players = state.players.lock().unwrap();
         if let Some(player) = players.get_mut(&entity_id) {
             player.cursor_item = item_id;
             player.cursor_count = if item_id >= 0 { count } else { 0 };

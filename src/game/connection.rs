@@ -384,14 +384,14 @@ fn lost_support(world: &std::collections::HashMap<(i32, i32, i32), u16>, nx: i32
     }
 }
 
-pub async fn notify_neighbors(state: &crate::world::SharedState, x: i32, y: i32, z: i32) {
+pub fn notify_neighbors(state: &crate::world::SharedState, x: i32, y: i32, z: i32) {
     let neighbors = [
         (x - 1, y, z), (x + 1, y, z),
         (x, y - 1, z), (x, y + 1, z),
         (x, y, z - 1), (x, y, z + 1),
     ];
     let mut to_break: Vec<(i32, i32, i32, u16)> = Vec::new();
-    let world = state.world.lock().await;
+    let world = state.world.lock().unwrap();
     for &(nx, ny, nz) in &neighbors {
         if let Some(&stored) = world.get(&(nx, ny, nz)) {
             let block_id = stored & 0xFFF;
@@ -404,12 +404,12 @@ pub async fn notify_neighbors(state: &crate::world::SharedState, x: i32, y: i32,
     drop(world);
     for (bx, by, bz, stored) in to_break {
         {
-            let mut world = state.world.lock().await;
+            let mut world = state.world.lock().unwrap();
             world.insert((bx, by, bz), 0);
         }
         let pkt = crate::packets::build_block_change(bx, by as u8, bz, 0);
         {
-            let players = state.players.lock().await;
+            let players = state.players.lock().unwrap();
             for (_, player) in players.iter() {
                 let _ = player.sender.send(pkt.clone());
             }
@@ -418,9 +418,9 @@ pub async fn notify_neighbors(state: &crate::world::SharedState, x: i32, y: i32,
         if item_id >= 0 {
             crate::items::spawn_item_entity(state, item_id, 1, 0,
                                             bx as f64 + 0.5, by as f64 + 0.5, bz as f64 + 0.5,
-                                            0, 0, 0).await;
+                                            0, 0, 0);
         }
-        crate::game::redstone::schedule_update(state, bx, by, bz).await;
+        crate::game::redstone::schedule_update(state, bx, by, bz);
     }
 }
 
@@ -434,12 +434,12 @@ fn chunks_in_view(cx: i32, cz: i32, view_distance: i32) -> Vec<(i32, i32)> {
     chunks
 }
 
-async fn update_chunks_for_player(
+fn update_chunks_for_player(
     state: &SharedState,
     entity_id: i32,
 ) {
     let (player_x, player_z, sender_clone) = {
-        let players = state.players.lock().await;
+        let players = state.players.lock().unwrap();
         match players.get(&entity_id) {
             Some(p) => (p.x, p.z, p.sender.clone()),
             None => return,
@@ -453,7 +453,7 @@ async fn update_chunks_for_player(
         .into_iter().collect();
 
     let (to_load, to_unload) = {
-        let mut players = state.players.lock().await;
+        let mut players = state.players.lock().unwrap();
         if let Some(player) = players.get_mut(&entity_id) {
             let to_load: Vec<(i32, i32)> = desired_chunks.difference(&player.loaded_chunks).copied().collect();
             let to_unload: Vec<(i32, i32)> = player.loaded_chunks.difference(&desired_chunks).copied().collect();
@@ -477,11 +477,14 @@ async fn update_chunks_for_player(
     }
 
     if !to_load.is_empty() {
-        let world_snapshot = state.world.lock().await.clone();
-        let block_min_x = to_load.iter().map(|(cx, _)| cx * 16).min().unwrap_or(0);
-        let block_max_x = to_load.iter().map(|(cx, _)| cx * 16 + 15).max().unwrap_or(0);
-        let block_min_z = to_load.iter().map(|(_, cz)| cz * 16).min().unwrap_or(0);
-        let block_max_z = to_load.iter().map(|(_, cz)| cz * 16 + 15).max().unwrap_or(0);
+        // Snapshot compact (uniquement les blocs stockés explicitement de la
+        // zone vue) au lieu de cloner le monde entier à chaque changement de
+        // chunk.
+        let world_snapshot = {
+            let world = state.world.lock().unwrap();
+            crate::world::extract_view_snapshot(&world, player_cx, player_cz, VIEW_DISTANCE)
+        };
+        let to_load_set: HashSet<(i32, i32)> = to_load.iter().copied().collect();
 
         for &(cx, cz) in &to_load {
             let pkt = build_chunk_packet(cx, cz, &world_snapshot);
@@ -490,8 +493,7 @@ async fn update_chunks_for_player(
 
         for (&(wx, wy, wz), &block_id) in world_snapshot.iter() {
             if block_id != 0
-                && wx >= block_min_x && wx <= block_max_x
-                && wz >= block_min_z && wz <= block_max_z
+                && to_load_set.contains(&(wx >> 4, wz >> 4))
                 && wy >= 0 && wy <= 255
             {
                 let packet = packets::build_block_change(wx, wy as u8, wz, block_id);
@@ -526,23 +528,23 @@ fn food_heal(item_id: i16) -> f32 {
     }
 }
 
-async fn handle_item_use(state: &SharedState, entity_id: i32, item_id: i16) {
+fn handle_item_use(state: &SharedState, entity_id: i32, item_id: i16) {
     let heal = food_heal(item_id);
     if heal > 0.0 {
-        let mut players = state.players.lock().await;
+        let mut players = state.players.lock().unwrap();
         if let Some(player) = players.get_mut(&entity_id) {
             if player.health >= 20.0 { return; }
             player.health = (player.health + heal).min(20.0);
             let health = player.health;
             drop(players);
             let health_pkt = packets::build_update_health(health, 20i16, 0.0);
-            let players = state.players.lock().await;
+            let players = state.players.lock().unwrap();
             if let Some(player) = players.get(&entity_id) {
                 let _ = player.sender.send(health_pkt);
             }
         }
         // remove one food item from hand
-        let mut players = state.players.lock().await;
+        let mut players = state.players.lock().unwrap();
         if let Some(player) = players.get_mut(&entity_id) {
             let held_idx = 36 + player.selected_slot;
             if held_idx < 45 && player.inventory[held_idx] == item_id && player.counts[held_idx] > 0 {
@@ -638,7 +640,7 @@ fn find_safe_spawn_inner(
 }
 
 async fn send_status(socket: &mut TcpStream, state: &SharedState) -> std::io::Result<()> {
-    let online = state.players.lock().await.len();
+    let online = state.players.lock().unwrap().len();
     let json = format!(
         r#"{{"version":{{"name":"1.7.10","protocol":5}},"players":{{"max":{},"online":{online},"sample":[]}},"description":{{"text":"{}"}}}}"#,
         state.config.max_players, state.config.motd
@@ -716,9 +718,22 @@ pub async fn handle_client(mut socket: TcpStream, state: SharedState) -> std::io
     send_login_success(&mut socket, &uuid, &username).await?;
     send_join_game(&mut socket, entity_id).await?;
 
-    let world_snapshot = state.world.lock().await.clone();
-
     let saved_data = save::load_player(&uuid);
+
+    // Snapshot compact de la zone vue (et seulement elle) au lieu de cloner
+    // le monde entier à chaque join : il ne contient que les blocs stockés
+    // explicitement du carré de chunks autour du point de départ (sauvegardé
+    // ou (8,8) pour un nouveau joueur). `get_block` synthétise le sol plat
+    // y <= 15, donc rien ne manque.
+    let (snap_cx, snap_cz) = match &saved_data {
+        Some(d) => ((d.x.floor() as i32) >> 4, (d.z.floor() as i32) >> 4),
+        None => (8 >> 4, 8 >> 4),
+    };
+    let world_snapshot = {
+        let world = state.world.lock().unwrap();
+        crate::world::extract_view_snapshot(&world, snap_cx, snap_cz, VIEW_DISTANCE)
+    };
+
     let (start_x, start_y, start_z) = if let Some(ref d) = saved_data {
         println!("Loaded saved data for {username}");
         // Le point sauvegardé peut avoir été enregistré enterré (ancien
@@ -816,6 +831,12 @@ pub async fn handle_client(mut socket: TcpStream, state: SharedState) -> std::io
         sneaking: false,
         sender: tx.clone(),
         loaded_chunks: initial_chunks,
+        last_bcast_x: i32::MIN,
+        last_bcast_y: i32::MIN,
+        last_bcast_z: i32::MIN,
+        last_bcast_yaw: 0,
+        last_bcast_pitch: 0,
+        last_chunk: (i32::MIN, i32::MIN),
     };
 
     let (mut reader, mut writer) = socket.into_split();
@@ -837,7 +858,7 @@ pub async fn handle_client(mut socket: TcpStream, state: SharedState) -> std::io
     });
 
     {
-        let mut players = state.players.lock().await;
+        let mut players = state.players.lock().unwrap();
 
         for other in players.values() {
             let _ = tx.send(packets::build_player_list_item(&other.username, true));
@@ -860,7 +881,7 @@ pub async fn handle_client(mut socket: TcpStream, state: SharedState) -> std::io
     }
 
     {
-        let players = state.players.lock().await;
+        let players = state.players.lock().unwrap();
         if let Some(player) = players.get(&entity_id) {
             for i in 0..45 {
                 if player.inventory[i] >= 0 {
@@ -874,7 +895,7 @@ pub async fn handle_client(mut socket: TcpStream, state: SharedState) -> std::io
     }
 
     {
-        let items = state.items.lock().await;
+        let items = state.items.lock().unwrap();
         for item in items.values() {
             let _ = tx.send(packets::build_spawn_item(item.entity_id, item.item_id, item.x, item.y, item.z, 0, 0, 0));
             let _ = tx.send(packets::build_item_metadata(item.entity_id, item.item_id, item.count, item.damage));
@@ -905,7 +926,7 @@ pub async fn handle_client(mut socket: TcpStream, state: SharedState) -> std::io
             loop {
                 interval.tick().await;
                 let Some((px, py, pz, inv, cnt)) = ({
-                    let players = state.players.lock().await;
+                    let players = state.players.lock().unwrap();
                     players.get(&entity_id).map(|p| (p.x, p.y, p.z, p.inventory, p.counts))
                 }) else { continue; };
 
@@ -913,7 +934,7 @@ pub async fn handle_client(mut socket: TcpStream, state: SharedState) -> std::io
                 let mut cnt_copy = cnt;
                 let mut to_pickup: Vec<(i32, i16, i8, i16, usize)> = Vec::new();
                 {
-                    let items = state.items.lock().await;
+                    let items = state.items.lock().unwrap();
                     for (&item_eid, item) in items.iter() {
                         if item.age < PICKUP_DELAY_TICKS { continue; }
                         let dx = px - item.x;
@@ -934,8 +955,8 @@ pub async fn handle_client(mut socket: TcpStream, state: SharedState) -> std::io
                 }
 
                 if !to_pickup.is_empty() {
-                    let mut items = state.items.lock().await;
-                    let mut players = state.players.lock().await;
+                    let mut items = state.items.lock().unwrap();
+                    let mut players = state.players.lock().unwrap();
                     let mut broadcasts: Vec<Vec<u8>> = Vec::new();
                     let mut self_packets: Vec<Vec<u8>> = Vec::new();
                     if let Some(player) = players.get_mut(&entity_id) {
@@ -967,7 +988,7 @@ pub async fn handle_client(mut socket: TcpStream, state: SharedState) -> std::io
     let result = read_loop(&mut reader, &state, entity_id).await;
 
     {
-        let mut players = state.players.lock().await;
+        let mut players = state.players.lock().unwrap();
         if let Some(player) = players.get(&entity_id) {
             if let Err(e) = save::save_player(player) {
                 println!("Error saving player {}: {e}", player.username);
@@ -1003,25 +1024,26 @@ async fn read_loop(
             let is_command = message.starts_with('/');
 
             if is_command {
-                crate::game::commands::handle_player_command(state, entity_id, &message).await;
+                crate::game::commands::handle_player_command(state, entity_id, &message);
             } else {
                 let (username, packet) = {
-                    let players = state.players.lock().await;
+                    let players = state.players.lock().unwrap();
                     let username = players.get(&entity_id).map(|j| j.username.clone()).unwrap_or_default();
                     let chat = format!("<{}> {}", username, message);
                     let json = format!("{{\"text\":\"{}\"}}", chat.replace('\\', "\\\\").replace('"', "\\\""));
                     (username, packets::build_chat(&json))
                 };
                 println!("{username}: {message}");
-                let players = state.players.lock().await;
+                let players = state.players.lock().unwrap();
                 for other in players.values() {
                     let _ = other.sender.send(packet.clone());
                 }
             }
         } else if id == 4 || id == 5 || id == 6 {
             let mut idx = 0;
-            let mut players = state.players.lock().await;
+            let mut players = state.players.lock().unwrap();
             let mut just_injured = false;
+            let mut chunk_changed = false;
             if let Some(player) = players.get_mut(&entity_id) {
                 if id == 4 || id == 6 {
                     player.x = read_f64_buf(&data, &mut idx);
@@ -1046,19 +1068,47 @@ async fn read_loop(
                 if on_ground {
                     player.highest_y = player.y;
                 }
-                let packet_tp = packets::build_entity_teleport(player);
-                let packet_head = packets::build_entity_head_look(player);
-                for (other_id, other) in players.iter() {
-                    if *other_id != entity_id {
-                        let _ = other.sender.send(packet_tp.clone());
-                        let _ = other.sender.send(packet_head.clone());
+                // Le client envoie ~20 paquets mouvement/s : on ne diffuse aux
+                // autres joueurs que si la position/look a changé à la
+                // précision du protocole (1/32 de bloc, 1/256 de tour), ce qui
+                // évite de rebroadcaster des positions identiques à chaque tick.
+                let qx = (player.x * 32.0) as i32;
+                let qy = (player.y * 32.0) as i32;
+                let qz = (player.z * 32.0) as i32;
+                let qyaw = ((player.yaw / 360.0) * 256.0) as i32 as u8;
+                let qpitch = ((player.pitch / 360.0) * 256.0) as i32 as u8;
+                let moved = qx != player.last_bcast_x || qy != player.last_bcast_y
+                    || qz != player.last_bcast_z || qyaw != player.last_bcast_yaw
+                    || qpitch != player.last_bcast_pitch;
+                if moved {
+                    player.last_bcast_x = qx;
+                    player.last_bcast_y = qy;
+                    player.last_bcast_z = qz;
+                    player.last_bcast_yaw = qyaw;
+                    player.last_bcast_pitch = qpitch;
+                    let chunk = (qx >> 9, qz >> 9);
+                    if chunk != player.last_chunk {
+                        player.last_chunk = chunk;
+                        chunk_changed = true;
+                    }
+                    let packet_tp = packets::build_entity_teleport(player);
+                    let packet_head = packets::build_entity_head_look(player);
+                    for (other_id, other) in players.iter() {
+                        if *other_id != entity_id {
+                            let _ = other.sender.send(packet_tp.clone());
+                            let _ = other.sender.send(packet_head.clone());
+                        }
                     }
                 }
             }
             drop(players);
-            update_chunks_for_player(state, entity_id).await;
+            // Ne recalcule les chunks que si le joueur a effectivement changé
+            // de chunk (comparaison en coordonnées fixe : chunk = fixed >> 9).
+            if chunk_changed {
+                update_chunks_for_player(state, entity_id);
+            }
             if just_injured {
-                let players = state.players.lock().await;
+                let players = state.players.lock().unwrap();
                 let (is_dead, health_packet) = {
                     let player = &players[&entity_id];
                     (player.health <= 0.0, packets::build_update_health(player.health, 20i16, 0.0))
@@ -1079,7 +1129,7 @@ async fn read_loop(
             let action = read_u8_buf(&data, &mut idx);
             println!("[USE ENTITY] entity={entity_id} target={target_id} action={action}");
             if action == 1 {
-                let mut players = state.players.lock().await;
+                let mut players = state.players.lock().unwrap();
                 let (attacker_creative, target_survival) = {
                     let att = players.get(&entity_id).map(|p| p.gamemode == 1).unwrap_or(false);
                     let tgt = players.get(&target_id).map(|p| p.gamemode != 1).unwrap_or(false);
@@ -1114,13 +1164,13 @@ async fn read_loop(
             let animation = read_u8_buf(&data, &mut idx);
             if animation == 104 || animation == 105 {
                 let sneaking = animation == 104;
-                let mut players = state.players.lock().await;
+                let mut players = state.players.lock().unwrap();
                 if let Some(player) = players.get_mut(&entity_id) {
                     player.sneaking = sneaking;
                 }
                 drop(players);
                 let pkt = packets::build_entity_metadata_flags(entity_id, sneaking);
-                let players = state.players.lock().await;
+                let players = state.players.lock().unwrap();
                 for (other_id, other) in players.iter() {
                     if *other_id != entity_id {
                         let _ = other.sender.send(pkt.clone());
@@ -1133,13 +1183,13 @@ async fn read_loop(
             let action = read_u8_buf(&data, &mut idx);
             if action == 1 || action == 2 {
                 let sneaking = action == 1;
-                let mut players = state.players.lock().await;
+                let mut players = state.players.lock().unwrap();
                 if let Some(player) = players.get_mut(&entity_id) {
                     player.sneaking = sneaking;
                 }
                 drop(players);
                 let pkt = packets::build_entity_metadata_flags(entity_id, sneaking);
-                let players = state.players.lock().await;
+                let players = state.players.lock().unwrap();
                 for (other_id, other) in players.iter() {
                     if *other_id != entity_id {
                         let _ = other.sender.send(pkt.clone());
@@ -1157,7 +1207,7 @@ async fn read_loop(
 
             if status == 3 || status == 4 {
                 let dropped = {
-                    let mut players = state.players.lock().await;
+                    let mut players = state.players.lock().unwrap();
                     if let Some(player) = players.get_mut(&entity_id) {
                         let held_idx = 36 + player.selected_slot;
                         let item = player.inventory[held_idx];
@@ -1199,25 +1249,25 @@ async fn read_loop(
                         packets::build_set_slot(0, held_slot, -1, 1, 0)
                     };
                     {
-                        let players = state.players.lock().await;
+                        let players = state.players.lock().unwrap();
                         if let Some(player) = players.get(&entity_id) {
                             let _ = player.sender.send(set_slot);
                         }
                     }
-                    items::spawn_item_entity(state, item, drop_count as i8, 0, px, py, pz, vel_x, vel_y, vel_z).await;
-                    crate::game::inventory::broadcast_equipment(state, entity_id).await;
+                    items::spawn_item_entity(state, item, drop_count as i8, 0, px, py, pz, vel_x, vel_y, vel_z);
+                    crate::game::inventory::broadcast_equipment(state, entity_id);
                 }
             }
 
             let (is_creative, _) = {
-                let players = state.players.lock().await;
+                let players = state.players.lock().unwrap();
                 let gamemode = players.get(&entity_id).map(|j| j.gamemode).unwrap_or(1);
                 (gamemode == 1, gamemode)
             };
             let should_break = status == 2 || (status == 0 && is_creative);
             if should_break {
                 let old_block = {
-                    let mut world = state.world.lock().await;
+                    let mut world = state.world.lock().unwrap();
                     let block = get_block(&world, x, y as i32, z);
                     world.insert((x, y as i32, z), 0);
                     block
@@ -1235,10 +1285,10 @@ async fn read_loop(
                         0
                     };
                     if other_yi >= 0 && other_yi <= 255 && other_yi != yi {
-                        let mut world = state.world.lock().await;
+                        let mut world = state.world.lock().unwrap();
                         world.insert((x, other_yi, z), 0);
                         packets.push(packets::build_block_change(x, other_yi as u8, z, 0));
-                        crate::game::redstone::schedule_update(state, x, other_yi, z).await;
+                        crate::game::redstone::schedule_update(state, x, other_yi, z);
                     }
                 }
                 // The piston base and its head are one logical block.  Break
@@ -1255,7 +1305,7 @@ async fn read_loop(
                     let (dx, dy, dz) = piston_offset(meta);
                     let head = (x + dx, y as i32 + dy, z + dz);
                     let removed_head = {
-                        let mut world = state.world.lock().await;
+                        let mut world = state.world.lock().unwrap();
                         if (get_block(&world, head.0, head.1, head.2) & 0xFFF) == 34 {
                             world.insert(head, 0);
                             true
@@ -1263,13 +1313,13 @@ async fn read_loop(
                     };
                     if removed_head {
                         packets.push(packets::build_block_change(head.0, head.1 as u8, head.2, 0));
-                        crate::game::redstone::schedule_update(state, head.0, head.1, head.2).await;
+                        crate::game::redstone::schedule_update(state, head.0, head.1, head.2);
                     }
                 } else if block_id == 34 {
                     let (dx, dy, dz) = piston_offset(meta);
                     let base = (x - dx, y as i32 - dy, z - dz);
                     let removed_base = {
-                        let mut world = state.world.lock().await;
+                        let mut world = state.world.lock().unwrap();
                         let candidate = get_block(&world, base.0, base.1, base.2);
                         if matches!(candidate & 0xFFF, 29 | 33) {
                             world.insert(base, 0);
@@ -1278,12 +1328,12 @@ async fn read_loop(
                     };
                     if removed_base {
                         packets.push(packets::build_block_change(base.0, base.1 as u8, base.2, 0));
-                        crate::game::redstone::schedule_update(state, base.0, base.1, base.2).await;
+                        crate::game::redstone::schedule_update(state, base.0, base.1, base.2);
                     }
                 }
-                notify_neighbors(state, x, y as i32, z).await;
-                crate::game::redstone::schedule_update(state, x, y as i32, z).await;
-                let players = state.players.lock().await;
+                notify_neighbors(state, x, y as i32, z);
+                crate::game::redstone::schedule_update(state, x, y as i32, z);
+                let players = state.players.lock().unwrap();
                 for (other_id, other) in players.iter() {
                     for pkt in &packets {
                         if *other_id != entity_id || pkt != &packets[0] {
@@ -1304,7 +1354,7 @@ async fn read_loop(
                             y as f64 + 0.5,
                             z as f64 + 0.5,
                             0, 0, 0,
-                        ).await;
+                        );
                     }
                 }
             }
@@ -1321,13 +1371,13 @@ async fn read_loop(
 
             if face >= 6 {
                 if item_id >= 0 {
-                    handle_item_use(state, entity_id, item_id).await;
+                    handle_item_use(state, entity_id, item_id);
                 }
             } else {
                 let (nx, ny, nz) = face_offset(x, y, z, face);
                 if ny >= 0 && ny <= 255 {
                     let clicked_block = {
-                        let world = state.world.lock().await;
+                        let world = state.world.lock().unwrap();
                         get_block(&world, x, y as i32, z)
                     };
 
@@ -1336,7 +1386,7 @@ async fn read_loop(
                         // lock before calling notify_neighbors (which itself locks
                         // state.world) to avoid a self-deadlock.
                         let toggled: Option<(i32, i32, i32, u16)> = {
-                            let mut world = state.world.lock().await;
+                            let mut world = state.world.lock().unwrap();
                             if let Some(&stored) = world.get(&(x, y as i32, z)) {
                                 let block_id = stored & 0xFFF;
                                 let meta = ((stored >> 12) & 0x0F) as u8;
@@ -1359,8 +1409,8 @@ async fn read_loop(
 
                         if let Some((bx, by, bz, new_stored)) = toggled {
                             let pkt = packets::build_block_change(bx, by as u8, bz, new_stored);
-                            notify_neighbors(state, bx, by, bz).await;
-                            crate::game::redstone::schedule_update(state, bx, by, bz).await;
+                            notify_neighbors(state, bx, by, bz);
+                            crate::game::redstone::schedule_update(state, bx, by, bz);
                             // Buttons are momentary switches.  The delayed
                             // queue is also used for repeaters, so it can
                             // restore their unpressed state without another
@@ -1371,16 +1421,16 @@ async fn read_loop(
                                 let delay = if toggled_id == 77 { 20 } else { 30 };
                                 let due = state.tick_counter.load(Ordering::SeqCst) + delay;
                                 let released = (toggled_id as u16) | (((toggled_meta & !0x08) as u16) << 12);
-                                state.redstone_delayed.lock().await.push_back((due, bx, by, bz, released));
+                                state.redstone_delayed.lock().unwrap().push_back((due, bx, by, bz, released));
                             }
-                            let players = state.players.lock().await;
+                            let players = state.players.lock().unwrap();
                             for (_, other) in players.iter() {
                                 let _ = other.sender.send(pkt.clone());
                             }
                         }
                     } else if item_id >= 0 {
                         let (yaw, pitch) = {
-                            let players = state.players.lock().await;
+                            let players = state.players.lock().unwrap();
                             players.get(&entity_id).map(|p| (p.yaw, p.pitch)).unwrap_or((0.0, 0.0))
                         };
                         let mut block_id = item_to_block_id(item_id);
@@ -1388,7 +1438,7 @@ async fn read_loop(
                             block_id = 68;
                         }
                         if !is_valid_placeable_block(block_id) {
-                            let players = state.players.lock().await;
+                            let players = state.players.lock().unwrap();
                             if let Some(player) = players.get(&entity_id) {
                                 let _ = player.sender.send(packets::build_disconnect("{\"text\":\"Invalid block\"}"));
                             }
@@ -1398,7 +1448,7 @@ async fn read_loop(
                             continue;
                         }
                         {
-                            let world = state.world.lock().await;
+                            let world = state.world.lock().unwrap();
                             if get_block(&world, nx, ny, nz) != 0 {
                                 continue;
                             }
@@ -1409,18 +1459,18 @@ async fn read_loop(
                         let stored = (block_id as u16) | ((meta as u16) << 12);
 
                         {
-                            let mut world = state.world.lock().await;
+                            let mut world = state.world.lock().unwrap();
                             world.insert((nx, ny, nz), stored);
                         }
-                        notify_neighbors(state, nx, ny, nz).await;
-                        crate::game::redstone::schedule_update(state, nx, ny, nz).await;
+                        notify_neighbors(state, nx, ny, nz);
+                        crate::game::redstone::schedule_update(state, nx, ny, nz);
 
                         let mut packets_to_broadcast: Vec<Vec<u8>> = Vec::new();
                         packets_to_broadcast.push(packets::build_block_change(nx, ny as u8, nz, stored));
 
                         if is_door && ny < 255 {
                             let hinge_right = {
-                                let world = state.world.lock().await;
+                                let world = state.world.lock().unwrap();
                                 let right_of = [(0i32, 0, -1), (-1, 0, 0), (0, 0, 1), (1, 0, 0)];
                                 let left_of = [(0i32, 0, 1), (1, 0, 0), (0, 0, -1), (-1, 0, 0)];
                                 let (rx, _, rz) = right_of[meta as usize];
@@ -1447,13 +1497,13 @@ async fn read_loop(
                             let top_meta: u16 = if hinge_right { 0x08 } else { 0x09 };
                             let top_stored = (block_id as u16) | (top_meta << 12);
                             {
-                                let mut world = state.world.lock().await;
+                                let mut world = state.world.lock().unwrap();
                                 world.insert((nx, ny + 1, nz), top_stored);
                             }
                             packets_to_broadcast.push(packets::build_block_change(nx, (ny + 1) as u8, nz, top_stored));
                         }
 
-                        let mut players = state.players.lock().await;
+                        let mut players = state.players.lock().unwrap();
                         for (_, other) in players.iter() {
                             for pkt in &packets_to_broadcast {
                                 let _ = other.sender.send(pkt.clone());
@@ -1486,18 +1536,18 @@ async fn read_loop(
             let slot = read_i16_buf(&data, &mut idx);
 
             {
-                let mut players = state.players.lock().await;
+                let mut players = state.players.lock().unwrap();
                 if let Some(player) = players.get_mut(&entity_id) {
                     if (0..9).contains(&slot) {
                         player.selected_slot = slot as usize;
                     }
                 }
             }
-            crate::game::inventory::broadcast_equipment(state, entity_id).await;
+            crate::game::inventory::broadcast_equipment(state, entity_id);
         } else if id == 0x0E {
-            crate::game::inventory::handle_click_window(state, entity_id, &data).await;
+            crate::game::inventory::handle_click_window(state, entity_id, &data);
         } else if id == 0x10 {
-            crate::game::inventory::handle_creative_inventory(state, entity_id, &data).await;
+            crate::game::inventory::handle_creative_inventory(state, entity_id, &data);
         } else if id == 0x16 {
             let mut idx = 0;
             let action = read_u8_buf(&data, &mut idx);
@@ -1514,11 +1564,14 @@ async fn read_loop(
                 // de se retrouver enterré (find_safe_spawn rappelé par-dessus
                 // le spawn déjà correct fait au login).
                 let is_actually_dead = {
-                    let players = state.players.lock().await;
+                    let players = state.players.lock().unwrap();
                     players.get(&entity_id).map(|p| p.health <= 0.0).unwrap_or(false)
                 };
                 if is_actually_dead {
-                let world_snapshot = state.world.lock().await.clone();
+                let world_snapshot = {
+                    let world = state.world.lock().unwrap();
+                    crate::world::extract_view_snapshot(&world, 0, 0, VIEW_DISTANCE)
+                };
                 let (spawn_x, spawn_y, spawn_z) = find_safe_spawn(&world_snapshot, 8, 8, 17);
 
                 let spawn_cx = (spawn_x.floor() as i32) >> 4;
@@ -1540,7 +1593,7 @@ async fn read_loop(
                     }
                 }
 
-                let mut players = state.players.lock().await;
+                let mut players = state.players.lock().unwrap();
                 if let Some(player) = players.get_mut(&entity_id) {
                     let sender = player.sender.clone();
                     let spawn_username = player.username.clone();
