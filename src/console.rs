@@ -187,8 +187,10 @@ fn handle_console_command(parts: &[&str], state: &SharedState) {
                         parse_rel_coord(parts[3], cy),
                         parse_rel_coord(parts[4], cz),
                     ) {
-                        teleport_entity(id, x, y, z, 0.0, 0.0, state);
-                        println!("Teleported {target_name} to ({x:.1}, {y:.1}, {z:.1})");
+                        let tx = crate::util::center_coord(x);
+                        let tz = crate::util::center_coord(z);
+                        teleport_entity(id, tx, y, tz, 0.0, 0.0, state);
+                        println!("Teleported {target_name} to ({tx:.1}, {y:.1}, {tz:.1})");
                     } else {
                         println!("Invalid coordinates");
                     }

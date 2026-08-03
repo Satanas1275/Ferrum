@@ -575,7 +575,8 @@ fn find_safe_spawn(
     cz: i32,
     default_y: i32,
 ) -> (f64, f64, f64) {
-    find_safe_spawn_inner(world, cx, cz, default_y)
+    let (x, y, z) = find_safe_spawn_inner(world, cx, cz, default_y);
+    (x + 0.5, y, z + 0.5)
 }
 
 fn find_safe_spawn_inner(

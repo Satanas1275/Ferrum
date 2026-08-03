@@ -11,6 +11,14 @@ pub fn parse_rel_coord(s: &str, current: f64) -> Option<f64> {
     }
 }
 
+pub fn center_coord(v: f64) -> f64 {
+    if v.fract() == 0.0 {
+        v + 0.5
+    } else {
+        v
+    }
+}
+
 pub fn face_offset(x: i32, y: u8, z: i32, face: u8) -> (i32, i32, i32) {
     match face {
         0 => (x, y as i32 - 1, z),

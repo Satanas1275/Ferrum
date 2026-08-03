@@ -119,8 +119,10 @@ pub fn handle_player_command(state: &SharedState, entity_id: i32, message: &str)
                     drop(players);
                     match (parse_rel_coord(&parts[1], cx), parse_rel_coord(&parts[2], cy), parse_rel_coord(&parts[3], cz)) {
                         (Some(x), Some(y), Some(z)) => {
-                            teleport_entity(entity_id, x, y, z, 0.0, 0.0, state);
-                            format!("§aTeleported to §f({x:.1}, {y:.1}, {z:.1})")
+                            let tx = crate::util::center_coord(x);
+                            let tz = crate::util::center_coord(z);
+                            teleport_entity(entity_id, tx, y, tz, 0.0, 0.0, state);
+                            format!("§aTeleported to §f({tx:.1}, {y:.1}, {tz:.1})")
                         }
                         _ => "§cInvalid coordinates".to_string(),
                     }
@@ -139,10 +141,12 @@ pub fn handle_player_command(state: &SharedState, entity_id: i32, message: &str)
                     drop(players);
                     match (parse_rel_coord(x_str, cx), parse_rel_coord(y_str, cy), parse_rel_coord(z_str, cz)) {
                         (Some(x), Some(y), Some(z)) => {
+                            let tx = crate::util::center_coord(x);
+                            let tz = crate::util::center_coord(z);
                             for id in &ids {
-                                teleport_entity(*id, x, y, z, 0.0, 0.0, state);
+                                teleport_entity(*id, tx, y, tz, 0.0, 0.0, state);
                             }
-                            format!("§aAll teleported to §f({x:.1}, {y:.1}, {z:.1})")
+                            format!("§aAll teleported to §f({tx:.1}, {y:.1}, {tz:.1})")
                         }
                         _ => "§cInvalid coordinates".to_string(),
                     }
@@ -152,8 +156,10 @@ pub fn handle_player_command(state: &SharedState, entity_id: i32, message: &str)
                     drop(players);
                     match (parse_rel_coord(x_str, cx), parse_rel_coord(y_str, cy), parse_rel_coord(z_str, cz)) {
                         (Some(x), Some(y), Some(z)) => {
-                            teleport_entity(target_id, x, y, z, 0.0, 0.0, state);
-                            format!("§a{target_str} teleported to §f({x:.1}, {y:.1}, {z:.1})")
+                            let tx = crate::util::center_coord(x);
+                            let tz = crate::util::center_coord(z);
+                            teleport_entity(target_id, tx, y, tz, 0.0, 0.0, state);
+                            format!("§a{target_str} teleported to §f({tx:.1}, {y:.1}, {tz:.1})")
                         }
                         _ => "§cInvalid coordinates".to_string(),
                     }
