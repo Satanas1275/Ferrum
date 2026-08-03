@@ -868,6 +868,11 @@ pub async fn handle_client(mut socket: TcpStream, state: SharedState) -> std::io
                 let _ = tx.send(pkt);
             }
             let _ = tx.send(packets::build_entity_metadata_flags(other.entity_id, other.sneaking));
+            // Le client 1.7.10 ne rend pas toujours l'entité d'un joueur
+            // existant au spawn : il ne l'affiche que quand il reçoit une mise
+            // à jour de position (cf. plus bas). On la déclenche directement.
+            let _ = tx.send(packets::build_entity_teleport(other));
+            let _ = tx.send(packets::build_entity_head_look(other));
         }
 
         let list_packet = packets::build_player_list_item(&username, true);
@@ -879,6 +884,36 @@ pub async fn handle_client(mut socket: TcpStream, state: SharedState) -> std::io
         let _ = tx.send(list_packet);
 
         players.insert(entity_id, new_player);
+    }
+
+    // Sécurité pour les connexions lentes : si le client était encore en train
+    // de charger le terrain pendant l'envoi immédiat ci-dessus, il a peut-être
+    // raté le déclenchement du rendu. On renvoie un téléport + head look (sans
+    // re-spawn, sinon l'entité est retirée puis ré-ajoutée -> clignotement) une
+    // fois le terrain chargé, ce qui force le rendu sans rien perturber.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+            let (sender, others) = {
+                let players = state.players.lock().unwrap();
+                let sender = players.get(&entity_id).map(|p| p.sender.clone());
+                let others: Vec<Vec<u8>> = players
+                    .iter()
+                    .filter(|(id, _)| **id != entity_id)
+                    .flat_map(|(_, p)| vec![
+                        packets::build_entity_teleport(p),
+                        packets::build_entity_head_look(p),
+                    ])
+                    .collect();
+                (sender, others)
+            };
+            if let Some(sender) = sender {
+                for pkt in others {
+                    let _ = sender.send(pkt);
+                }
+            }
+        });
     }
 
     {
