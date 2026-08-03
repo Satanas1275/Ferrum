@@ -42,6 +42,7 @@ pub fn build_spawn_player(j: &Player) -> Vec<u8> {
     let mut content = write_varint(j.entity_id);
     content.extend(write_string(&j.uuid));
     content.extend(write_string(&j.username));
+    content.extend(write_varint(0));
     content.extend(((j.x * 32.0) as i32).to_be_bytes());
     content.extend(((j.y * 32.0) as i32).to_be_bytes());
     content.extend(((j.z * 32.0) as i32).to_be_bytes());
@@ -52,7 +53,7 @@ pub fn build_spawn_player(j: &Player) -> Vec<u8> {
     let current_item = if current_item < 0 { 0 } else { current_item };
     content.extend(current_item.to_be_bytes());
 
-    content.extend(&[0x00, 0x00, 0x00, 0x7F]);
+    content.extend(&[0x00, 0x00, 0x7F]);
     build_packet(0x0C, &mut content)
 }
 
