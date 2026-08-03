@@ -19,6 +19,22 @@ use crate::world::{get_block, build_chunk_packet, SharedState};
 /// Rayon de recherche horizontale (en blocs) autour du point de spawn.
 const SPAWN_SEARCH_RADIUS: i32 = 8;
 
+/// Compensation verticale appliquée à la position de spawn (join ET respawn).
+///
+/// Demande explicite de l'utilisateur : le client affiche le joueur 2 blocs
+/// plus bas que le Y envoyé dans le paquet 0x08 (comportement observé, cause
+/// exacte côté client pas encore identifiée avec certitude). Sans cette
+/// compensation, le joueur apparaît 2 blocs trop bas par rapport à ce qu'il
+/// doit être.
+///
+/// Elle remplace l'ancien `+2.0` qui n'était appliqué QU'AU JOIN : le respawn
+/// (find_safe_spawn sans compensation) faisait réapparaître le joueur 2 blocs
+/// trop bas. Elle doit s'appliquer à TOUTES les positions de spawn :
+/// nouveau joueur, reconnexion depuis la sauvegarde (la position sauvegardée
+/// est celle réellement occupée par le joueur = pieds, elle a donc elle aussi
+/// besoin de la compensation) et respawn.
+const SPAWN_Y_OFFSET: f64 = 2.0;
+
 /// Distance de vue en chunks (rayon autour du chunk du joueur).
 const VIEW_DISTANCE: i32 = 3;
 
@@ -750,24 +766,18 @@ pub async fn handle_client(mut socket: TcpStream, state: SharedState) -> std::io
             || get_block(&world_snapshot, dx, dy + 1, dz) != 0;
         if embedded {
             println!("{username}'s saved position was embedded in terrain, correcting");
-            let (sx, sy, sz) = find_safe_spawn(&world_snapshot, dx, dz, dy);
-            (sx, sy, sz)
+            find_safe_spawn(&world_snapshot, dx, dz, dy)
         } else {
             (d.x, d.y, d.z)
         }
     } else {
-        let (sx, sy, sz) = find_safe_spawn(&world_snapshot, 8, 8, 17);
-        (sx, sy, sz)
+        find_safe_spawn(&world_snapshot, 8, 8, 17)
     };
-    // HACK temporaire demandé explicitement par l'utilisateur : peu importe
-    // le chemin emprunté ci-dessus (sauvegarde ou find_safe_spawn), le
-    // joueur se retrouve systématiquement 2 blocs trop bas par rapport à ce
-    // qu'il devrait être, cause pas encore identifiée avec certitude. En
-    // attendant de la trouver, on rajoute +2 ici sur le Y, une seule fois,
-    // après que start_y a été décidé (peu importe la branche empruntée).
-    // Moche mais ça corrige le symptôme immédiatement.
-    // -> Si un jour la vraie cause est trouvée, il faudra RETIRER ce +2.0.
-    let start_y = start_y + 2.0;
+    // Compensation appliquée à TOUTES les positions de spawn (nouveau joueur,
+    // reconnexion depuis la sauvegarde, position enterrée corrigée) : la
+    // position sauvegardée est celle réellement occupée par le joueur (pieds)
+    // et a donc elle aussi besoin du +2 pour s'afficher au bon endroit.
+    let start_y = start_y + SPAWN_Y_OFFSET;
 
     let start_cx = (start_x.floor() as i32) >> 4;
     let start_cz = (start_z.floor() as i32) >> 4;
@@ -1609,6 +1619,7 @@ async fn read_loop(
                     crate::world::extract_view_snapshot(&world, 0, 0, VIEW_DISTANCE)
                 };
                 let (spawn_x, spawn_y, spawn_z) = find_safe_spawn(&world_snapshot, 8, 8, 17);
+                let spawn_y = spawn_y + SPAWN_Y_OFFSET;
 
                 let spawn_cx = (spawn_x.floor() as i32) >> 4;
                 let spawn_cz = (spawn_z.floor() as i32) >> 4;
