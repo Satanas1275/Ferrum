@@ -434,7 +434,7 @@ fn chunks_in_view(cx: i32, cz: i32, view_distance: i32) -> Vec<(i32, i32)> {
     chunks
 }
 
-fn update_chunks_for_player(
+pub(crate) fn update_chunks_for_player(
     state: &SharedState,
     entity_id: i32,
 ) {

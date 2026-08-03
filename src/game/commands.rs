@@ -5,20 +5,41 @@ use crate::util::{get_process_ram_mb, parse_rel_coord};
 use crate::world::SharedState;
 
 pub fn teleport_entity(entity_id: i32, x: f64, y: f64, z: f64, yaw: f32, pitch: f32, state: &SharedState) {
+    // Même compensation Y que le spawn (cf. le hack +2 au join) : sans elle,
+    // le joueur apparaît 2 blocs trop bas après une téléportation.
+    let y = y + 2.0;
     let packet_view = packets::build_entity_teleport_pos(entity_id, x, y, z, yaw, pitch);
     let packet_self = packets::build_player_position_look(x, y, z, yaw, pitch);
-    let mut players = state.players.lock().unwrap();
-    if let Some(player) = players.get_mut(&entity_id) {
-        player.x = x;
-        player.y = y;
-        player.z = z;
-        player.yaw = yaw;
-        player.pitch = pitch;
-        let _ = player.sender.send(packet_self);
+
+    {
+        let mut players = state.players.lock().unwrap();
+        if let Some(player) = players.get_mut(&entity_id) {
+            player.x = x;
+            player.y = y;
+            player.z = z;
+            player.yaw = yaw;
+            player.pitch = pitch;
+            // Force un rechargement des chunks même si le client renvoie sa
+            // position après coup.
+            player.last_chunk = (i32::MIN, i32::MIN);
+        }
     }
-    for (other_id, other) in players.iter() {
-        if *other_id != entity_id {
-            let _ = other.sender.send(packet_view.clone());
+
+    // Recharge les chunks autour de la nouvelle position AVANT d'envoyer la
+    // position (comme au spawn : son chunk d'abord, le reste ensuite), sinon
+    // un tp loin fait tomber le client dans le vide le temps que le monde se
+    // charge.
+    crate::game::connection::update_chunks_for_player(state, entity_id);
+
+    {
+        let mut players = state.players.lock().unwrap();
+        if let Some(player) = players.get_mut(&entity_id) {
+            let _ = player.sender.send(packet_self);
+        }
+        for (other_id, other) in players.iter() {
+            if *other_id != entity_id {
+                let _ = other.sender.send(packet_view.clone());
+            }
         }
     }
 }
