@@ -14,7 +14,7 @@
 - [ ] Decorations
 - [ ] Trees
 - [ ] Snow & Ice
-- [ ] Spawn
+- [x] Spawn
 - [ ] Optimization
 - [ ] API
 - [ ] Testing
@@ -90,7 +90,7 @@
 ## Terrain Fill
 
 - [ ] Stone
-- [ ] Air
+- [x] Air
 - [ ] Water
 
 ---
@@ -202,8 +202,8 @@
 
 # Spawn
 
-- [ ] Spawn Search
-- [ ] Spawn Validation
+- [x] Spawn Search
+- [x] Spawn Validation
 
 ---
 
@@ -211,7 +211,7 @@
 
 - [ ] Biome Cache
 - [ ] Noise Cache
-- [ ] Parallel Generation
+- [x] Parallel Generation
 - [ ] Async Generation
 - [ ] SIMD
 - [ ] Chunk Pipeline
@@ -234,7 +234,7 @@
 
 - [ ] Chunk Borders
 - [ ] Determinism
-- [ ] Infinite Generation
+- [x] Infinite Generation
 - [ ] Performance
 - [ ] Stress Test
 
