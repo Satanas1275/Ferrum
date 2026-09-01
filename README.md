@@ -16,8 +16,9 @@ A from-scratch async Minecraft server implementation for **1.7.10**, written in 
 - **Food system** — eat to heal (apple, bread, meats, etc.)
 - **Combat** — entity use (attack), fall damage, health system
 - **Teleportation** — relative coordinates, cross-player, `@a` selector
-- **Console** — tab completion, `help`, `list`, `say`, `stop`, `gamemode`, `tp`, `tps`, `load`
-- **In-game commands** — `/gamemode`, `/tp`, `/tps`, `/load`, `/help`
+- **Console** — tab completion, `help`, `list`, `say`, `stop`, `gamemode`, `tp`, `tps`, `load`, `seed`
+- **In-game commands** — `/gamemode`, `/tp`, `/tps`, `/load`, `/help <command>`, `/locate`
+- **Procedural Overworld generation** — seed-based noise (Perlin, FBM, Simplex, Value), 15 biomes (with real per-chunk biome data sent to the client), terrain, caves/ravines, ores, trees (oak, birch, spruce, pine, jungle, acacia, dark oak, large oak), surface vegetation, water/lava springs, waterfalls, lakes, snow & ice, deterministic and parallel chunk generation
 - **TPS tracking** — dedicated tick thread at 20 TPS, CPU/RAM monitoring
 - **Redstone** — wire, torches, repeaters, comparators, powered components (⚠️ experimental)
 - **Placement rules** — surface-type checks (flowers on grass, cactus on sand, etc.)
@@ -57,9 +58,9 @@ Don't run this on a public, untrusted network yet. Treat it as LAN/friends-only 
 - [x] Block placement validation and surface-type rules
 - [x] Block support cascade (auto-break unsupported blocks)
 - [x] Redstone wire, torches, repeaters, comparators (experimental)
+- [x] Real world generation (procedural Overworld: biomes, terrain, caves, ores, trees, vegetation, lakes)
 - [ ] Fix redstone propagation edge cases
 - [ ] Piston extension/retraction
-- [ ] Real world generation (currently flat only)
 - [ ] Sound implementation
 - [ ] Small fixes (knockback on PvP, correct damage values)
 - [ ] Critical hit implementation

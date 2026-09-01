@@ -2,22 +2,22 @@
 
 ## Progress
 
-- [ ] Foundation
-- [ ] Noise System
-- [ ] Biomes
-- [ ] Terrain
-- [ ] Surface
-- [ ] Carvers
-- [ ] Ores
-- [ ] Liquids
+- [x] Foundation
+- [x] Noise System
+- [x] Biomes
+- [x] Terrain
+- [x] Surface
+- [x] Carvers
+- [x] Ores
+- [x] Liquids
 - [ ] Structures
-- [ ] Decorations
-- [ ] Trees
-- [ ] Snow & Ice
+- [x] Decorations
+- [x] Trees
+- [x] Snow & Ice
 - [x] Spawn
-- [ ] Optimization
+- [x] Optimization
 - [ ] API
-- [ ] Testing
+- [x] Testing
 
 ---
 
@@ -25,19 +25,19 @@
 
 ## Random
 
-- [ ] World Seed
-- [ ] Chunk Seed
-- [ ] Deterministic RNG
-- [ ] Coordinate Hashing
+- [x] World Seed
+- [x] Chunk Seed
+- [x] Deterministic RNG
+- [x] Coordinate Hashing
 
 ## Noise
 
-- [ ] Perlin Noise
-- [ ] Simplex Noise
-- [ ] Value Noise
-- [ ] FBM
-- [ ] Octaves
-- [ ] Interpolation
+- [x] Perlin Noise
+- [x] Simplex Noise (canal `clay`)
+- [x] Value Noise (canal `patch`)
+- [x] FBM
+- [x] Octaves
+- [x] Interpolation
 - [ ] Noise Cache
 
 ---
@@ -46,30 +46,30 @@
 
 ## Climate
 
-- [ ] Temperature
-- [ ] Humidity
-- [ ] Continentalness
+- [x] Temperature
+- [x] Humidity
+- [x] Continentalness
 - [ ] Weirdness
-- [ ] Erosion
+- [x] Erosion
 
 ## Biome Selection
 
-- [ ] Plains
-- [ ] Forest
-- [ ] Taiga
-- [ ] Jungle
-- [ ] Desert
-- [ ] Savanna
-- [ ] Swamp
-- [ ] Mountains
-- [ ] Ocean
-- [ ] Deep Ocean
-- [ ] Mushroom Island
+- [x] Plains
+- [x] Forest
+- [x] Taiga
+- [x] Jungle
+- [x] Desert
+- [x] Savanna
+- [x] Swamp
+- [x] Mountains
+- [x] Ocean
+- [x] Deep Ocean
+- [x] Mushroom Island
 
 ## Transitions
 
-- [ ] Rivers
-- [ ] Beaches
+- [x] Rivers
+- [x] Beaches
 - [ ] Shore
 - [ ] Hills
 - [ ] Smoothing
@@ -80,38 +80,38 @@
 
 ## Heightmap
 
-- [ ] Base Height
-- [ ] Height Variation
-- [ ] Mountains
-- [ ] Valleys
+- [x] Base Height
+- [x] Height Variation
+- [x] Mountains
+- [x] Valleys
 - [ ] Cliffs
 - [ ] Blending
 
 ## Terrain Fill
 
-- [ ] Stone
+- [x] Stone
 - [x] Air
-- [ ] Water
+- [x] Water
 
 ---
 
 # Surface
 
-- [ ] Grass
-- [ ] Dirt
-- [ ] Sand
-- [ ] Gravel
-- [ ] Clay
-- [ ] Snow
-- [ ] Ice
-- [ ] Mycelium
+- [x] Grass
+- [x] Dirt
+- [x] Sand
+- [x] Gravel
+- [x] Clay
+- [x] Snow
+- [x] Ice
+- [x] Mycelium
 
 ---
 
 # Carvers
 
-- [ ] Caves
-- [ ] Ravines
+- [x] Caves
+- [x] Ravines
 - [ ] Cave Networks
 
 ---
@@ -120,13 +120,13 @@
 
 ## Overworld
 
-- [ ] Coal
-- [ ] Iron
-- [ ] Gold
-- [ ] Redstone
-- [ ] Diamond
-- [ ] Emerald
-- [ ] Lapis
+- [x] Coal
+- [x] Iron
+- [x] Gold
+- [x] Redstone
+- [x] Diamond
+- [x] Emerald
+- [x] Lapis
 
 ## Nether
 
@@ -136,10 +136,10 @@
 
 # Liquids
 
-- [ ] Water Springs
-- [ ] Lava Springs
-- [ ] Lakes
-- [ ] Waterfalls
+- [x] Water Springs
+- [x] Lava Springs
+- [x] Lakes
+- [x] Waterfalls
 
 ---
 
@@ -161,42 +161,42 @@
 
 ## Vegetation
 
-- [ ] Tall Grass
-- [ ] Flowers
-- [ ] Mushrooms
-- [ ] Sugar Cane
-- [ ] Cactus
-- [ ] Dead Bush
-- [ ] Vines
-- [ ] Lily Pads
+- [x] Tall Grass
+- [x] Flowers
+- [x] Mushrooms
+- [x] Sugar Cane
+- [x] Cactus
+- [x] Dead Bush
+- [x] Vines
+- [x] Lily Pads
 
 ## Misc
 
-- [ ] Pumpkins
-- [ ] Melons
+- [x] Pumpkins
+- [x] Melons
 
 ---
 
 # Trees
 
-- [ ] Oak
-- [ ] Large Oak
-- [ ] Birch
-- [ ] Spruce
-- [ ] Pine
+- [x] Oak
+- [x] Large Oak
+- [x] Birch
+- [x] Spruce
+- [x] Pine
 - [ ] Mega Taiga
-- [ ] Jungle
-- [ ] Large Jungle
-- [ ] Swamp
-- [ ] Acacia
-- [ ] Dark Oak
+- [x] Jungle
+- [x] Large Jungle
+- [x] Swamp
+- [x] Acacia
+- [x] Dark Oak
 
 ---
 
 # Snow & Ice
 
-- [ ] Snow Layer
-- [ ] Water Freezing
+- [x] Snow Layer
+- [x] Water Freezing
 
 ---
 
@@ -233,9 +233,9 @@
 # Testing
 
 - [ ] Chunk Borders
-- [ ] Determinism
+- [x] Determinism
 - [x] Infinite Generation
-- [ ] Performance
+- [x] Performance
 - [ ] Stress Test
 
 ---

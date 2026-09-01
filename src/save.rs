@@ -74,7 +74,116 @@ pub fn save_chunk(cx: i32, cz: i32, blocks: &HashMap<(i32, i32, i32), u16>) -> s
     Ok(())
 }
 
-pub fn load_chunk(cx: i32, cz: i32) -> std::io::Result<HashMap<(i32, i32, i32), u16>> {
+/// Encode un tableau de chunk dense au format disque : 1 octet "nombre de
+/// sections", puis les blocs u16 LE section par section. Format identique à
+/// l'ancien encodage map-based.
+pub fn encode_chunk_data(data: &[u16; crate::world::CHUNK_LEN]) -> Vec<u8> {
+    let mut section_count = 0u8;
+    for sy in (0..16).rev() {
+        let y_start = sy * 16 * 256;
+        let y_end = y_start + 16 * 256;
+        if data[y_start..y_end].iter().any(|&b| b != 0) {
+            section_count = sy as u8 + 1;
+            break;
+        }
+    }
+
+    let n_sections = section_count as usize;
+    let mut out = Vec::with_capacity(1 + n_sections * 16 * 256 * 2);
+    out.push(section_count);
+    let end = n_sections * 16 * 256;
+    for &b in &data[..end] {
+        out.extend_from_slice(&b.to_le_bytes());
+    }
+    out
+}
+
+/// Sauvegarde tous les chunks fusionnés présents en mémoire.
+///
+/// `encoded` = liste ((cx, cz), données encodées) préparée par
+/// `persist_world` (encodage sous lock, IO hors lock).
+///
+/// `known` = ensemble des chunks légitimes (générés cette session ou
+/// chargés du disque) : les fichiers .dat hors de cet ensemble sont
+/// supprimés. Avec la génération paresseuse, un chunk pas encore visité ne
+/// figure PAS dans la map monde et son fichier ne doit surtout pas être
+/// supprimé.
+pub fn save_all_chunks(
+    encoded: Vec<((i32, i32), Vec<u8>)>,
+    known: &std::collections::HashSet<(i32, i32)>,
+) -> std::io::Result<()> {
+    ensure_dirs();
+    for ((cx, cz), data) in &encoded {
+        fs::write(chunk_path(*cx, *cz), data)?;
+    }
+
+    // Les chunks connus mais absents de la map monde (éditions en attente,
+    // jamais générés) doivent garder leur fichier existant tel quel.
+    if let Ok(entries) = fs::read_dir(CHUNKS_DIR) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if let Some(stripped) = name.strip_suffix(".dat") {
+                    let parts: Vec<&str> = stripped.split('_').collect();
+                    if parts.len() == 2 {
+                        if let (Ok(cx), Ok(cz)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) {
+                            if known.contains(&(cx, cz)) {
+                                continue;
+                            }
+                        }
+                    }
+                    let _ = fs::remove_file(format!("{}/{}", CHUNKS_DIR, name));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Sauvegarde des éditions en attente (chunks chargés du disque mais pas
+/// encore régénérés/fusionnés). Le fichier reste partiel : il sera
+/// réécrit en entier au prochain autosave suivant la fusion.
+pub fn save_pending_edits(pending: &HashMap<(i32, i32), HashMap<(i32, i32, i32), u16>>) -> std::io::Result<()> {
+    ensure_dirs();
+    for ((cx, cz), blocks) in pending {
+        save_chunk(*cx, *cz, blocks)?;
+    }
+    Ok(())
+}
+
+/// Charge toutes les éditions disque, groupées par chunk.
+///
+/// Contrairement à l'ancien `load_all_chunks`, les blocs à 0 explicites
+/// (blocs détruits par un joueur) sont CONSERVÉS : ils doivent pouvoir
+/// effacer le terrain régénéré au moment de la fusion.
+pub fn load_all_edits() -> std::io::Result<(HashMap<(i32, i32), HashMap<(i32, i32, i32), u16>>, usize)> {
+    ensure_dirs();
+    let mut per_chunk: HashMap<(i32, i32), HashMap<(i32, i32, i32), u16>> = HashMap::new();
+    let mut total = 0usize;
+
+    if let Ok(entries) = fs::read_dir(CHUNKS_DIR) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if let Some(stripped) = name_str.strip_suffix(".dat") {
+                let parts: Vec<&str> = stripped.split('_').collect();
+                if parts.len() == 2 {
+                    if let (Ok(cx), Ok(cz)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) {
+                        if let Ok(chunk_blocks) = load_chunk_with_zeros(cx, cz) {
+                            total += chunk_blocks.len();
+                            per_chunk.insert((cx, cz), chunk_blocks);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((per_chunk, total))
+}
+
+/// Comme `load_chunk` mais conserve les zéros explicites.
+fn load_chunk_with_zeros(cx: i32, cz: i32) -> std::io::Result<HashMap<(i32, i32, i32), u16>> {
     let path = chunk_path(cx, cz);
     let mut file = fs::File::open(&path)?;
     let mut buf = Vec::new();
@@ -92,92 +201,26 @@ pub fn load_chunk(cx: i32, cz: i32) -> std::io::Result<HashMap<(i32, i32, i32), 
     let base_x = cx * 16;
     let base_z = cz * 16;
 
-    for sy in 0..section_count {
+    'outer: for sy in 0..section_count {
         let y_start = (sy as i32) * 16;
         for ly in 0..16 {
             for lz in 0..16 {
                 for lx in 0..16 {
                     if idx + 2 > buf.len() {
-                        return Ok(blocks);
+                        break 'outer;
                     }
                     let block = u16::from_le_bytes([buf[idx], buf[idx + 1]]);
                     idx += 2;
-                    if block != 0 {
-                        let wx = base_x + lx;
-                        let wz = base_z + lz;
-                        let wy = y_start + ly;
-                        blocks.insert((wx, wy, wz), block);
-                    }
+                    let wx = base_x + lx;
+                    let wz = base_z + lz;
+                    let wy = y_start + ly;
+                    blocks.insert((wx, wy, wz), block);
                 }
             }
         }
     }
 
     Ok(blocks)
-}
-
-pub fn save_all_chunks(blocks: &HashMap<(i32, i32, i32), u16>) -> std::io::Result<()> {
-    ensure_dirs();
-    let mut chunks: HashMap<(i32, i32), Vec<(i32, i32, i32, u16)>> = HashMap::new();
-    for (&(x, y, z), &block) in blocks {
-        if block == 0 { continue; }
-        let cx = x >> 4;
-        let cz = z >> 4;
-        chunks.entry((cx, cz)).or_default().push((x, y, z, block));
-    }
-
-    for ((cx, cz), entries) in &chunks {
-        let mut chunk_blocks = HashMap::new();
-        for &(x, y, z, block) in entries {
-            chunk_blocks.insert((x, y, z), block);
-        }
-        save_chunk(*cx, *cz, &chunk_blocks)?;
-    }
-
-    let mut saved_chunks: Vec<String> = Vec::new();
-    if let Ok(entries) = fs::read_dir(CHUNKS_DIR) {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                saved_chunks.push(name.to_string());
-            }
-        }
-    }
-
-    let active_keys: std::collections::HashSet<String> = chunks.keys()
-        .map(|(cx, cz)| format!("{}_{}.dat", cx, cz))
-        .collect();
-
-    for name in &saved_chunks {
-        if !active_keys.contains(name) {
-            let _ = fs::remove_file(format!("{}/{}", CHUNKS_DIR, name));
-        }
-    }
-
-    Ok(())
-}
-
-pub fn load_all_chunks() -> std::io::Result<HashMap<(i32, i32, i32), u16>> {
-    ensure_dirs();
-    let mut all_blocks = HashMap::new();
-
-    if let Ok(entries) = fs::read_dir(CHUNKS_DIR) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if let Some(stripped) = name_str.strip_suffix(".dat") {
-                let parts: Vec<&str> = stripped.split('_').collect();
-                if parts.len() == 2 {
-                    if let (Ok(cx), Ok(cz)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) {
-                        if let Ok(chunk_blocks) = load_chunk(cx, cz) {
-                            all_blocks.extend(chunk_blocks);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(all_blocks)
 }
 
 pub fn save_player(player: &Player) -> std::io::Result<()> {
@@ -207,6 +250,7 @@ pub fn save_player(player: &Player) -> std::io::Result<()> {
     Ok(())
 }
 
+#[derive(Clone)]
 pub struct PlayerData {
     pub x: f64,
     pub y: f64,
@@ -318,6 +362,12 @@ mod tests {
             sneaking: false,
             sender: tokio::sync::mpsc::unbounded_channel().0,
             loaded_chunks: std::collections::HashSet::new(),
+            last_bcast_x: i32::MIN,
+            last_bcast_y: i32::MIN,
+            last_bcast_z: i32::MIN,
+            last_bcast_yaw: 0,
+            last_bcast_pitch: 0,
+            last_chunk: (i32::MIN, i32::MIN),
         };
 
         save_player(&player).unwrap();

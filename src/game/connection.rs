@@ -330,7 +330,7 @@ fn block_metadata(block_id: u16, face: u8, yaw: f32, pitch: f32, cursor_y: u8, d
 
 /// Check if the block at (nx, ny, nz) still has its required support.
 /// Returns `true` if it should break.
-fn lost_support(world: &std::collections::HashMap<(i32, i32, i32), u16>, nx: i32, ny: i32, nz: i32, block_id: u16, meta: u8) -> bool {
+fn lost_support(world: &crate::world::WorldMap, nx: i32, ny: i32, nz: i32, block_id: u16, meta: u8) -> bool {
     let support_air = |ox: i32, oy: i32, oz: i32| -> bool {
         let b = crate::world::get_block(world, ox, oy, oz);
         (b & 0xFFF) == 0
@@ -409,7 +409,8 @@ pub fn notify_neighbors(state: &crate::world::SharedState, x: i32, y: i32, z: i3
     let mut to_break: Vec<(i32, i32, i32, u16)> = Vec::new();
     let world = state.world.lock().unwrap();
     for &(nx, ny, nz) in &neighbors {
-        if let Some(&stored) = world.get(&(nx, ny, nz)) {
+        let stored = crate::world::get_block(&world, nx, ny, nz);
+        if stored != 0 {
             let block_id = stored & 0xFFF;
             let meta = ((stored >> 12) & 0x0F) as u8;
             if lost_support(&world, nx, ny, nz, block_id, meta) {
@@ -421,7 +422,7 @@ pub fn notify_neighbors(state: &crate::world::SharedState, x: i32, y: i32, z: i3
     for (bx, by, bz, stored) in to_break {
         {
             let mut world = state.world.lock().unwrap();
-            world.insert((bx, by, bz), 0);
+            crate::world::set_block_at(&mut world, (bx, by, bz), 0);
         }
         let pkt = crate::packets::build_block_change(bx, by as u8, bz, 0);
         {
@@ -493,28 +494,16 @@ pub(crate) fn update_chunks_for_player(
     }
 
     if !to_load.is_empty() {
-        // Snapshot compact (uniquement les blocs stockés explicitement de la
-        // zone vue) au lieu de cloner le monde entier à chaque changement de
-        // chunk.
-        let world_snapshot = {
-            let world = state.world.lock().unwrap();
-            crate::world::extract_view_snapshot(&world, player_cx, player_cz, VIEW_DISTANCE)
-        };
-        let to_load_set: HashSet<(i32, i32)> = to_load.iter().copied().collect();
-
+        // Génération paresseuse (parallèle) : s'assurer que tous les chunks
+        // de la zone existent dans la map monde AVANT de construire les
+        // paquets. Chaque paquet lit directement le tableau dense de son
+        // chunk — plus besoin de snapshot ni d'envoi bloc-par-bloc (le
+        // paquet 0x21 contient déjà tous les blocs + métadonnées).
+        crate::world::ensure_area(state, player_cx, player_cz, VIEW_DISTANCE);
+        let world = state.world.lock().unwrap();
         for &(cx, cz) in &to_load {
-            let pkt = build_chunk_packet(cx, cz, &world_snapshot);
+            let pkt = build_chunk_packet(cx, cz, &world);
             let _ = sender_clone.send(pkt);
-        }
-
-        for (&(wx, wy, wz), &block_id) in world_snapshot.iter() {
-            if block_id != 0
-                && to_load_set.contains(&(wx >> 4, wz >> 4))
-                && wy >= 0 && wy <= 255
-            {
-                let packet = packets::build_block_change(wx, wy as u8, wz, block_id);
-                let _ = sender_clone.send(packet);
-            }
         }
     }
 }
@@ -586,7 +575,7 @@ fn handle_item_use(state: &SharedState, entity_id: i32, item_id: i16) {
 ///
 /// Retourne (x, y, z) du point trouvé.
 fn find_safe_spawn(
-    world: &std::collections::HashMap<(i32, i32, i32), u16>,
+    world: &crate::world::WorldMap,
     cx: i32,
     cz: i32,
     default_y: i32,
@@ -596,7 +585,7 @@ fn find_safe_spawn(
 }
 
 fn find_safe_spawn_inner(
-    world: &std::collections::HashMap<(i32, i32, i32), u16>,
+    world: &crate::world::WorldMap,
                    cx: i32,
                    cz: i32,
                    default_y: i32,
@@ -656,6 +645,56 @@ fn find_safe_spawn_inner(
     }
 }
 
+/// Trouve le spawn d'un NOUVEAU joueur dans le monde procédural.
+///
+/// Recherche en spirale (pas de 8 blocs, ordre par distance croissante)
+/// via `preview_column` : un simple échantillonnage du climat SANS générer
+/// de chunk. On retient la première colonne :
+/// - dont le biome n'est pas océan/fleuve/plage,
+/// - suffisamment au-dessus du niveau de la mer.
+/// Puis on génère réellement la zone et on vérifie la surface exacte
+/// depuis la map monde (le terrain peut différer légèrement du preview à
+/// cause des grottes à fleur de sol).
+fn find_world_spawn(state: &SharedState) -> (f64, f64, f64) {
+    const SEARCH_LIMIT: i32 = 512;
+    let mut offsets: Vec<(i32, i32)> = (-SEARCH_LIMIT..=SEARCH_LIMIT)
+        .step_by(8)
+        .flat_map(|dx| (-SEARCH_LIMIT..=SEARCH_LIMIT).step_by(8).map(move |dz| (dx, dz)))
+        .collect();
+    offsets.sort_by_key(|&(dx, dz)| dx * dx + dz * dz);
+
+    for &(dx, dz) in &offsets {
+        let col = state.generator.preview_column(dx, dz);
+        let ok_biome = !matches!(
+            col.biome,
+            crate::worldgen::biomes::Biome::Ocean
+                | crate::worldgen::biomes::Biome::DeepOcean
+                | crate::worldgen::biomes::Biome::River
+                | crate::worldgen::biomes::Biome::Beach
+        );
+        if !ok_biome || col.height < crate::worldgen::climate::SEA_LEVEL + 2 {
+            continue;
+        }
+        // Vérification sur le vrai terrain (génère la zone si besoin).
+        crate::world::ensure_area(state, dx >> 4, dz >> 4, 1);
+        let world = state.world.lock().unwrap();
+        if let Some(sy) = crate::world::surface_y(&world, dx, dz) {
+            let top = get_block(&world, dx, sy, dz);
+            // Éviter de spawner sur une feuille d'arbre ou sous l'eau.
+            if top != 18 && top != 9 {
+                return (dx as f64 + 0.5, (sy + 1) as f64, dz as f64 + 0.5);
+            }
+        }
+    }
+
+    // Aucun site valide trouvé dans le rayon (quasi impossible) : spawn à
+    // l'origine, surface réelle.
+    crate::world::ensure_area(state, 0, 0, 1);
+    let world = state.world.lock().unwrap();
+    let sy = crate::world::surface_y(&world, 0, 0).unwrap_or(64);
+    (0.5, (sy + 1) as f64, 0.5)
+}
+
 async fn send_status(socket: &mut TcpStream, state: &SharedState) -> std::io::Result<()> {
     let online = state.players.lock().unwrap().len();
     let json = format!(
@@ -683,7 +722,7 @@ async fn send_join_game(socket: &mut TcpStream, entity_id: i32) -> std::io::Resu
     content.push(0u8);
     content.push(1u8);
     content.push(20u8);
-    content.extend(write_string("flat"));
+    content.extend(write_string("default"));
     let packet = packets::build_packet_id(0x01, &mut content);
     socket.write_all(&packet).await?;
     Ok(())
@@ -736,80 +775,94 @@ pub async fn handle_client(mut socket: TcpStream, state: SharedState) -> std::io
     send_join_game(&mut socket, entity_id).await?;
 
     let saved_data = save::load_player(&uuid);
+    let saved_for_join = saved_data.clone();
 
-    // Snapshot compact de la zone vue (et seulement elle) au lieu de cloner
-    // le monde entier à chaque join : il ne contient que les blocs stockés
-    // explicitement du carré de chunks autour du point de départ (sauvegardé
-    // ou (8,8) pour un nouveau joueur). `get_block` synthétise le sol plat
-    // y <= 15, donc rien ne manque.
-    let (snap_cx, snap_cz) = match &saved_data {
-        Some(d) => ((d.x.floor() as i32) >> 4, (d.z.floor() as i32) >> 4),
-        None => (8 >> 4, 8 >> 4),
-    };
-    let world_snapshot = {
-        let world = state.world.lock().unwrap();
-        crate::world::extract_view_snapshot(&world, snap_cx, snap_cz, VIEW_DISTANCE)
-    };
+    // Toute la partie lourde (génération parallèle des chunks, snapshot,
+    // construction + compression zlib des 49 paquets de chunk) tourne dans
+    // spawn_blocking : elle ne bloque PAS les workers tokio, donc le chat,
+    // les commandes et les autres joueurs restent fluides pendant un join.
+    let join_state = state.clone();
+    let join_username = username.clone();
+    let ((start_x, start_y, start_z), initial_chunks, own_chunk_pkt, remaining_chunks_buf) =
+        tokio::task::spawn_blocking(move || -> ((f64, f64, f64), HashSet<(i32, i32)>, Vec<u8>, Vec<u8>) {
+            let saved_data = saved_for_join;
+            // Détermine le point de départ AVANT tout : la génération
+            // procédurale est paresseuse, il faut donc d'abord générer les chunks
+            // de la zone (join + éventuelle correction de position), puis lire
+            // directement dans la map monde.
+            let (start_x, start_y, start_z) = if let Some(ref d) = saved_data {
+                println!("Loaded saved data for {join_username}");
+                let dx = d.x.floor() as i32;
+                let dz = d.z.floor() as i32;
+                crate::world::ensure_area(&join_state, dx >> 4, dz >> 4, VIEW_DISTANCE);
+                // Le point sauvegardé peut avoir été enregistré enterré : on
+                // revalide qu'il y a bien 2 blocs d'air (pieds + tête) avant de
+                // faire confiance à la sauvegarde ; sinon on cherche le sol libre
+                // le plus proche à cette colonne (x, z).
+                let world = join_state.world.lock().unwrap();
+                let dy = d.y.floor() as i32;
+                let embedded = get_block(&world, dx, dy, dz) != 0
+                    || get_block(&world, dx, dy + 1, dz) != 0;
+                if embedded {
+                    println!("{join_username}'s saved position was embedded in terrain, correcting");
+                    find_safe_spawn(&world, dx, dz, dy)
+                } else {
+                    (d.x, d.y, d.z)
+                }
+            } else {
+                let (sx, sy, sz) = find_world_spawn(&join_state);
+                let scx = (sx.floor() as i32) >> 4;
+                let scz = (sz.floor() as i32) >> 4;
+                crate::world::ensure_area(&join_state, scx, scz, VIEW_DISTANCE);
+                (sx, sy, sz)
+            };
+            // Compensation appliquée à TOUTES les positions de spawn (nouveau joueur,
+            // reconnexion depuis la sauvegarde, position enterrée corrigée) : la
+            // position sauvegardée est celle réellement occupée par le joueur (pieds)
+            // et a donc elle aussi besoin du +2 pour s'afficher au bon endroit.
+            let start_y = start_y + SPAWN_Y_OFFSET;
 
-    let (start_x, start_y, start_z) = if let Some(ref d) = saved_data {
-        println!("Loaded saved data for {username}");
-        // Le point sauvegardé peut avoir été enregistré enterré (ancien
-        // joueur qui a subi le bug maintenant corrigé) : on revalide qu'il y a
-        // bien 2 blocs d'air (pieds + tête) à cet endroit avant de faire
-        // confiance à la sauvegarde ; sinon on cherche le sol libre le plus
-        // proche à cette colonne (x, z), sans le téléporter ailleurs sur la
-        // carte.
-        let dx = d.x.floor() as i32;
-        let dy = d.y.floor() as i32;
-        let dz = d.z.floor() as i32;
-        let embedded = get_block(&world_snapshot, dx, dy, dz) != 0
-            || get_block(&world_snapshot, dx, dy + 1, dz) != 0;
-        if embedded {
-            println!("{username}'s saved position was embedded in terrain, correcting");
-            find_safe_spawn(&world_snapshot, dx, dz, dy)
-        } else {
-            (d.x, d.y, d.z)
-        }
-    } else {
-        find_safe_spawn(&world_snapshot, 8, 8, 17)
-    };
-    // Compensation appliquée à TOUTES les positions de spawn (nouveau joueur,
-    // reconnexion depuis la sauvegarde, position enterrée corrigée) : la
-    // position sauvegardée est celle réellement occupée par le joueur (pieds)
-    // et a donc elle aussi besoin du +2 pour s'afficher au bon endroit.
-    let start_y = start_y + SPAWN_Y_OFFSET;
+            let start_cx = (start_x.floor() as i32) >> 4;
+            let start_cz = (start_z.floor() as i32) >> 4;
+            let chunk_min_x = start_cx - VIEW_DISTANCE;
+            let chunk_max_x = start_cx + VIEW_DISTANCE;
+            let chunk_min_z = start_cz - VIEW_DISTANCE;
+            let chunk_max_z = start_cz + VIEW_DISTANCE;
+            let initial_chunks: HashSet<(i32, i32)> = (chunk_min_x..=chunk_max_x)
+                .flat_map(|x| (chunk_min_z..=chunk_max_z).map(move |z| (x, z)))
+                .collect();
 
-    let start_cx = (start_x.floor() as i32) >> 4;
-    let start_cz = (start_z.floor() as i32) >> 4;
-    let chunk_min_x = start_cx - VIEW_DISTANCE;
-    let chunk_max_x = start_cx + VIEW_DISTANCE;
-    let chunk_min_z = start_cz - VIEW_DISTANCE;
-    let chunk_max_z = start_cz + VIEW_DISTANCE;
-    let initial_chunks: HashSet<(i32, i32)> = (chunk_min_x..=chunk_max_x)
-        .flat_map(|x| (chunk_min_z..=chunk_max_z).map(move |z| (x, z)))
-        .collect();
+            // Les paquets se construisent directement depuis les tableaux
+            // denses des chunks (générés ci-dessus) — pas de snapshot global.
+            let world = join_state.world.lock().unwrap();
 
-    // Le chunk du joueur (celui sous ses pieds) part en premier, tout seul,
-    // suivi immédiatement de sa position. Avant, les 49 chunks partaient dans
-    // un ordre arbitraire (min->max) puis SEULEMENT ENSUITE la position ;
-    // le client pouvait se retrouver à traiter sa propre position avant que
-    // son propre chunk soit posé, ou avec des chunks voisins sans le sien -> il
-    // tombe dans le vide le temps que tout arrive, puis tout se stabilise d'un
-    // coup (effet "reload").
-    let own_chunk_pkt = build_chunk_packet(start_cx, start_cz, &world_snapshot);
+            // Le chunk du joueur (celui sous ses pieds) part en premier, tout seul,
+            // suivi immédiatement de sa position. Avant, les 49 chunks partaient dans
+            // un ordre arbitraire (min->max) puis SEULEMENT ENSUITE la position ;
+            // le client pouvait se retrouver à traiter sa propre position avant que
+            // son propre chunk soit posé, ou avec des chunks voisins sans le sien -> il
+            // tombe dans le vide le temps que tout arrive, puis tout se stabilise d'un
+            // coup (effet "reload").
+            let own_chunk_pkt = build_chunk_packet(start_cx, start_cz, &world);
+
+            let mut remaining_chunks_buf = Vec::new();
+            for cx in chunk_min_x..=chunk_max_x {
+                for cz in chunk_min_z..=chunk_max_z {
+                    if cx == start_cx && cz == start_cz {
+                        continue; // déjà envoyé au-dessus
+                    }
+                    let pkt = build_chunk_packet(cx, cz, &world);
+                    remaining_chunks_buf.extend(pkt);
+                }
+            }
+
+            ((start_x, start_y, start_z), initial_chunks, own_chunk_pkt, remaining_chunks_buf)
+        })
+        .await
+        .expect("join generation task panicked");
+
     socket.write_all(&own_chunk_pkt).await?;
     send_spawn_position(&mut socket, start_x, start_y, start_z).await?;
-
-    let mut remaining_chunks_buf = Vec::new();
-    for cx in chunk_min_x..=chunk_max_x {
-        for cz in chunk_min_z..=chunk_max_z {
-            if cx == start_cx && cz == start_cz {
-                continue; // déjà envoyé au-dessus
-            }
-            let pkt = build_chunk_packet(cx, cz, &world_snapshot);
-            remaining_chunks_buf.extend(pkt);
-        }
-    }
     socket.write_all(&remaining_chunks_buf).await?;
 
     println!("{username} is now online!");
@@ -1087,6 +1140,9 @@ async fn read_loop(
             }
         } else if id == 4 || id == 5 || id == 6 {
             let mut idx = 0;
+            // Bloc dédié : le MutexGuard players doit SORTIR DE SCOPE avant
+            // le .await plus bas (spawn_blocking), sinon la future n'est pas Send.
+            let (just_injured, chunk_changed) = {
             let mut players = state.players.lock().unwrap();
             let mut just_injured = false;
             let mut chunk_changed = false;
@@ -1148,10 +1204,17 @@ async fn read_loop(
                 }
             }
             drop(players);
+            (just_injured, chunk_changed)
+            };
             // Ne recalcule les chunks que si le joueur a effectivement changé
             // de chunk (comparaison en coordonnées fixe : chunk = fixed >> 9).
+            // spawn_blocking : la génération éventuelle + la construction des
+            // paquets ne bloquent pas le worker tokio (chat/commandes fluides).
             if chunk_changed {
-                update_chunks_for_player(state, entity_id);
+                let bc_state = state.clone();
+                tokio::task::spawn_blocking(move || {
+                    update_chunks_for_player(&bc_state, entity_id);
+                }).await.ok();
             }
             if just_injured {
                 let players = state.players.lock().unwrap();
@@ -1315,7 +1378,7 @@ async fn read_loop(
                 let old_block = {
                     let mut world = state.world.lock().unwrap();
                     let block = get_block(&world, x, y as i32, z);
-                    world.insert((x, y as i32, z), 0);
+                    crate::world::set_block_at(&mut world, (x, y as i32, z), 0);
                     block
                 };
                 let mut packets = vec![packets::build_block_change(x, y, z, 0)];
@@ -1332,7 +1395,7 @@ async fn read_loop(
                     };
                     if other_yi >= 0 && other_yi <= 255 && other_yi != yi {
                         let mut world = state.world.lock().unwrap();
-                        world.insert((x, other_yi, z), 0);
+                        crate::world::set_block_at(&mut world, (x, other_yi, z), 0);
                         packets.push(packets::build_block_change(x, other_yi as u8, z, 0));
                         crate::game::redstone::schedule_update(state, x, other_yi, z);
                     }
@@ -1353,7 +1416,7 @@ async fn read_loop(
                     let removed_head = {
                         let mut world = state.world.lock().unwrap();
                         if (get_block(&world, head.0, head.1, head.2) & 0xFFF) == 34 {
-                            world.insert(head, 0);
+                            crate::world::set_block_at(&mut world, head, 0);
                             true
                         } else { false }
                     };
@@ -1368,7 +1431,7 @@ async fn read_loop(
                         let mut world = state.world.lock().unwrap();
                         let candidate = get_block(&world, base.0, base.1, base.2);
                         if matches!(candidate & 0xFFF, 29 | 33) {
-                            world.insert(base, 0);
+                            crate::world::set_block_at(&mut world, base, 0);
                             true
                         } else { false }
                     };
@@ -1433,18 +1496,19 @@ async fn read_loop(
                         // state.world) to avoid a self-deadlock.
                         let toggled: Option<(i32, i32, i32, u16)> = {
                             let mut world = state.world.lock().unwrap();
-                            if let Some(&stored) = world.get(&(x, y as i32, z)) {
+                            let stored = get_block(&world, x, y as i32, z);
+                            if stored != 0 {
                                 let block_id = stored & 0xFFF;
                                 let meta = ((stored >> 12) & 0x0F) as u8;
                                 if (block_id == 64 || block_id == 71) && (meta & 0x08) != 0 && y > 0 {
                                     let bottom = get_block(&world, x, y as i32 - 1, z);
                                     toggle_block(bottom).map(|new_stored| {
-                                        world.insert((x, y as i32 - 1, z), new_stored);
+                                        crate::world::set_block_at(&mut world, (x, y as i32 - 1, z), new_stored);
                                         (x, y as i32 - 1, z, new_stored)
                                     })
                                 } else {
                                     toggle_block(stored).map(|new_stored| {
-                                        world.insert((x, y as i32, z), new_stored);
+                                        crate::world::set_block_at(&mut world, (x, y as i32, z), new_stored);
                                         (x, y as i32, z, new_stored)
                                     })
                                 }
@@ -1506,7 +1570,7 @@ async fn read_loop(
 
                         {
                             let mut world = state.world.lock().unwrap();
-                            world.insert((nx, ny, nz), stored);
+                            crate::world::set_block_at(&mut world, (nx, ny, nz), stored);
                         }
                         notify_neighbors(state, nx, ny, nz);
                         crate::game::redstone::schedule_update(state, nx, ny, nz);
@@ -1544,7 +1608,7 @@ async fn read_loop(
                             let top_stored = (block_id as u16) | (top_meta << 12);
                             {
                                 let mut world = state.world.lock().unwrap();
-                                world.insert((nx, ny + 1, nz), top_stored);
+                                crate::world::set_block_at(&mut world, (nx, ny + 1, nz), top_stored);
                             }
                             packets_to_broadcast.push(packets::build_block_change(nx, (ny + 1) as u8, nz, top_stored));
                         }
@@ -1614,31 +1678,40 @@ async fn read_loop(
                     players.get(&entity_id).map(|p| p.health <= 0.0).unwrap_or(false)
                 };
                 if is_actually_dead {
-                let world_snapshot = {
-                    let world = state.world.lock().unwrap();
-                    crate::world::extract_view_snapshot(&world, 0, 0, VIEW_DISTANCE)
-                };
-                let (spawn_x, spawn_y, spawn_z) = find_safe_spawn(&world_snapshot, 8, 8, 17);
-                let spawn_y = spawn_y + SPAWN_Y_OFFSET;
+                // Respawn au spawn du monde : recherche + génération + paquets
+                // dans spawn_blocking (même logique qu'au join).
+                let respawn_state = state.clone();
+                let ((spawn_x, spawn_y, spawn_z), rmin_x, rmax_x, rmin_z, rmax_z, own_chunk_pkt, chunk_packets) =
+                    tokio::task::spawn_blocking(move || {
+                        let (spawn_x, spawn_y, spawn_z) = find_world_spawn(&respawn_state);
+                        let spawn_cx0 = (spawn_x.floor() as i32) >> 4;
+                        let spawn_cz0 = (spawn_z.floor() as i32) >> 4;
+                        crate::world::ensure_area(&respawn_state, spawn_cx0, spawn_cz0, VIEW_DISTANCE);
+                        let spawn_y = spawn_y + SPAWN_Y_OFFSET;
 
-                let spawn_cx = (spawn_x.floor() as i32) >> 4;
-                let spawn_cz = (spawn_z.floor() as i32) >> 4;
-                let rmin_x = spawn_cx - VIEW_DISTANCE;
-                let rmax_x = spawn_cx + VIEW_DISTANCE;
-                let rmin_z = spawn_cz - VIEW_DISTANCE;
-                let rmax_z = spawn_cz + VIEW_DISTANCE;
-                // Même principe qu'au join : son propre chunk + sa position en
-                // premier, le reste après (voir commentaire au join plus haut).
-                let own_chunk_pkt = build_chunk_packet(spawn_cx, spawn_cz, &world_snapshot);
-                let mut chunk_packets: Vec<Vec<u8>> = Vec::new();
-                for cx in rmin_x..=rmax_x {
-                    for cz in rmin_z..=rmax_z {
-                        if cx == spawn_cx && cz == spawn_cz {
-                            continue;
+                        let spawn_cx = (spawn_x.floor() as i32) >> 4;
+                        let spawn_cz = (spawn_z.floor() as i32) >> 4;
+                        let rmin_x = spawn_cx - VIEW_DISTANCE;
+                        let rmax_x = spawn_cx + VIEW_DISTANCE;
+                        let rmin_z = spawn_cz - VIEW_DISTANCE;
+                        let rmax_z = spawn_cz + VIEW_DISTANCE;
+                        // Même principe qu'au join : son propre chunk + sa position en
+                        // premier, le reste après (voir commentaire au join plus haut).
+                        let world = respawn_state.world.lock().unwrap();
+                        let own_chunk_pkt = build_chunk_packet(spawn_cx, spawn_cz, &world);
+                        let mut chunk_packets: Vec<Vec<u8>> = Vec::new();
+                        for cx in rmin_x..=rmax_x {
+                            for cz in rmin_z..=rmax_z {
+                                if cx == spawn_cx && cz == spawn_cz {
+                                    continue;
+                                }
+                                chunk_packets.push(build_chunk_packet(cx, cz, &world));
+                            }
                         }
-                        chunk_packets.push(build_chunk_packet(cx, cz, &world_snapshot));
-                    }
-                }
+                        ((spawn_x, spawn_y, spawn_z), rmin_x, rmax_x, rmin_z, rmax_z, own_chunk_pkt, chunk_packets)
+                    })
+                    .await
+                    .expect("respawn generation task panicked");
 
                 let mut players = state.players.lock().unwrap();
                 if let Some(player) = players.get_mut(&entity_id) {

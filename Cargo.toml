@@ -9,6 +9,13 @@ md-5 = "0.10.6"
 rustyline = "15"
 tokio = { version = "1.52.3", features = ["full"] }
 
+[profile.dev]
+# La génération procédurale est très gourmande en maths flottantes : sans
+# optimisation, un chunk coûte ~50 ms en debug contre <1 ms en release,
+# ce qui rendait le serveur de dev injouable (lags à chaque changement de
+# chunk). opt-level 1 garde des temps de compilation raisonnables.
+opt-level = 1
+
 [profile.release]
 opt-level = 3
 lto = true

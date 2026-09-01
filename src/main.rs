@@ -8,9 +8,11 @@ mod player;
 mod save;
 mod util;
 mod world;
+mod worldgen;
 
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI32, AtomicU64};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::net::TcpListener;
@@ -18,32 +20,47 @@ use tokio::net::TcpListener;
 use crate::config::ServerConfig;
 use crate::game::connection::handle_client;
 use crate::world::{SharedState, State, TpsTracker};
+use crate::worldgen::WorldGenerator;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> std::io::Result<()> {
     let config = ServerConfig::load();
 
-    let loaded_world = match save::load_all_chunks() {
-        Ok(blocks) => {
-            println!("Loaded {} blocks from disk", blocks.len());
-            blocks
+    // Éditions disque (chunks sauvegardés) : elles sont appliquées
+    // par-dessus le terrain procédural quand le chunk concerné est
+    // généré. Rien n'est chargé en bloc dans la map monde : la génération
+    // est paresseuse et déterministe.
+    let pending_edits = match save::load_all_edits() {
+        Ok((edits, total)) => {
+            println!(
+                "Loaded {} saved chunks ({} blocks) as pending edits",
+                edits.len(),
+                total
+            );
+            edits
         }
         Err(e) => {
             println!("No existing world found or error loading: {e}");
-            std::collections::HashMap::new()
+            HashMap::new()
         }
     };
 
+    let generator = WorldGenerator::new(config.seed);
+    println!("World seed: {}", config.seed);
+
     let port = config.port;
     let state: SharedState = Arc::new(State {
-        players: std::sync::Mutex::new(std::collections::HashMap::new()),
-        world: std::sync::Mutex::new(loaded_world),
-        items: std::sync::Mutex::new(std::collections::HashMap::new()),
+        players: Mutex::new(HashMap::new()),
+        world: Mutex::new(HashMap::new()),
+        items: Mutex::new(HashMap::new()),
         next_id: AtomicI32::new(1),
-        tps: std::sync::Mutex::new(TpsTracker::new()),
-        redstone_queue: std::sync::Mutex::new(std::collections::VecDeque::new()),
-        redstone_delayed: std::sync::Mutex::new(std::collections::VecDeque::new()),
+        tps: Mutex::new(TpsTracker::new()),
+        redstone_queue: Mutex::new(std::collections::VecDeque::new()),
+        redstone_delayed: Mutex::new(std::collections::VecDeque::new()),
         tick_counter: AtomicU64::new(0),
+        generator: generator,
+        generated_chunks: Mutex::new(HashSet::new()),
+        pending_edits: Mutex::new(pending_edits),
         config,
     });
 
@@ -64,9 +81,8 @@ async fn main() -> std::io::Result<()> {
             interval.tick().await;
             loop {
                 interval.tick().await;
-                let blocks = state.world.lock().unwrap().clone();
-                match save::save_all_chunks(&blocks) {
-                    Ok(_) => println!("[AUTOSAVE] World saved ({} blocks)", blocks.len()),
+                match crate::world::persist_world(&state) {
+                    Ok(n) => println!("[AUTOSAVE] World saved ({n} chunks)"),
                     Err(e) => println!("[AUTOSAVE] Error saving world: {e}"),
                 }
                 let players = state.players.lock().unwrap();

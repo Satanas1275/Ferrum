@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::Ordering;
 
 use crate::packets;
@@ -69,7 +69,7 @@ fn facing(rot: u8) -> (i32, i32) {
     }
 }
 
-fn dust_power_input(world: &HashMap<(i32, i32, i32), u16>, x: i32, y: i32, z: i32) -> u8 {
+fn dust_power_input(world: &crate::world::WorldMap, x: i32, y: i32, z: i32) -> u8 {
     let mut power: u8 = 0;
 
     for (dx, dz) in &[(1,0), (-1,0), (0,1), (0,-1)] {
@@ -162,7 +162,7 @@ fn dust_power_input(world: &HashMap<(i32, i32, i32), u16>, x: i32, y: i32, z: i3
     power
 }
 
-fn is_strongly_powered(world: &HashMap<(i32, i32, i32), u16>, x: i32, y: i32, z: i32, stored: u16) -> bool {
+fn is_strongly_powered(world: &crate::world::WorldMap, x: i32, y: i32, z: i32, stored: u16) -> bool {
     let block = block_id(stored);
     if block == 75 { return true; }
     if block == 94 { return true; }
@@ -182,7 +182,7 @@ fn is_strongly_powered(world: &HashMap<(i32, i32, i32), u16>, x: i32, y: i32, z:
     false
 }
 
-fn is_block_powered(world: &HashMap<(i32, i32, i32), u16>, x: i32, y: i32, z: i32) -> bool {
+fn is_block_powered(world: &crate::world::WorldMap, x: i32, y: i32, z: i32) -> bool {
     // check all 6 neighbors for direct power sources or strong power
     for &(nx, ny, nz) in &[(x-1,y,z),(x+1,y,z),(x,y-1,z),(x,y+1,z),(x,y,z-1),(x,y,z+1)] {
         let n = get_block(world, nx, ny, nz);
@@ -326,7 +326,7 @@ fn reset_dust_network(state: &SharedState, seeds: &[(i32, i32, i32)]) -> Vec<(i3
 
         {
             let mut world = state.world.lock().unwrap();
-            world.insert((x, y, z), encode(55, 0));
+            crate::world::set_block_at(&mut world, (x, y, z), encode(55, 0));
         }
         reset_list.push((x, y, z));
 
@@ -365,16 +365,28 @@ pub fn tick(state: &SharedState) {
     };
     let plate_changes: Vec<(i32, i32, i32, u16)> = {
         let mut world = state.world.lock().unwrap();
-        let positions: Vec<(i32, i32, i32)> = world.iter()
-            .filter_map(|(&(x, y, z), &stored)| matches!(block_id(stored), 70 | 72 | 147 | 148).then_some((x, y, z)))
-            .collect();
+        // Avec le stockage par-chunk, on ne balaye que les chunks marqu�s
+        // "contient des plaques" (flag mis � jour � l'�criture/fusion) au
+        // lieu de parcourir toute la map 20 fois par seconde.
+        let mut positions: Vec<(i32, i32, i32)> = Vec::new();
+        for (&(cx, cz), chunk) in world.iter_mut() {
+            if !chunk.has_plates { continue; }
+            for (idx, &stored) in chunk.blocks.iter().enumerate() {
+                if matches!(block_id(stored), 70 | 72 | 147 | 148) {
+                    let y = (idx >> 8) as i32;
+                    let lz = ((idx >> 4) & 15) as i32;
+                    let lx = (idx & 15) as i32;
+                    positions.push((cx * 16 + lx, y, cz * 16 + lz));
+                }
+            }
+        }
         let mut changes = Vec::new();
         for (x, y, z) in positions {
             let stored = get_block(&world, x, y, z);
             let powered = occupied.contains(&(x, y, z));
             let new_stored = encode(block_id(stored), if powered { 1 } else { 0 });
             if new_stored != stored {
-                world.insert((x, y, z), new_stored);
+                crate::world::set_block_at(&mut world, (x, y, z), new_stored);
                 changes.push((x, y, z, new_stored));
             }
         }
@@ -394,7 +406,7 @@ pub fn tick(state: &SharedState) {
                 let pkt = packets::build_block_change(x, y as u8, z, stored);
                 {
                     let mut world = state.world.lock().unwrap();
-                    world.insert((x, y, z), stored);
+                    crate::world::set_block_at(&mut world, (x, y, z), stored);
                 }
                 let players = state.players.lock().unwrap();
                 for (_, p) in players.iter() {
@@ -491,7 +503,7 @@ pub fn tick(state: &SharedState) {
                 if new_block != block {
                     let ns = encode(new_block, m);
                     let mut world = state.world.lock().unwrap();
-                    world.insert((x, y, z), ns);
+                    crate::world::set_block_at(&mut world, (x, y, z), ns);
                     drop(world);
                     send_block_update(state, x, y, z, ns);
                 }
@@ -584,7 +596,7 @@ pub fn tick(state: &SharedState) {
         if let Some(ns) = new_stored {
             {
                 let mut world = state.world.lock().unwrap();
-                world.insert((x, y, z), ns);
+                crate::world::set_block_at(&mut world, (x, y, z), ns);
             }
             send_block_update(state, x, y, z, ns);
             crate::game::connection::notify_neighbors(state, x, y, z);
@@ -688,7 +700,7 @@ pub fn tick(state: &SharedState) {
     {
         let mut world = state.world.lock().unwrap();
         for &(x, y, z, ns) in &pending_actuations {
-            world.insert((x, y, z), ns);
+            crate::world::set_block_at(&mut world, (x, y, z), ns);
 
             let piston = block_id(ns);
             if !matches!(piston, 29 | 33) {
@@ -719,33 +731,33 @@ pub fn tick(state: &SharedState) {
                     // Move from the far end first, so no block is overwritten.
                     for &((bx, by, bz), moved) in chain.iter().rev() {
                         let destination = (bx + dx, by + dy, bz + dz);
-                        world.insert(destination, moved);
+                        crate::world::set_block_at(&mut world, destination, moved);
                         block_updates.push((destination.0, destination.1, destination.2, moved));
                     }
                     let head_meta = (piston_meta & 0x07) | if piston == 29 { 0x08 } else { 0 };
                     let head_block = encode(34, head_meta);
-                    world.insert(head, head_block);
+                    crate::world::set_block_at(&mut world, head, head_block);
                     block_updates.push((head.0, head.1, head.2, head_block));
                 } else {
                     // A piston cannot push more than 12 blocks (or an
                     // immovable block), so it remains retracted.
                     let retracted = encode(piston, piston_meta & !0x08);
-                    world.insert((x, y, z), retracted);
+                    crate::world::set_block_at(&mut world, (x, y, z), retracted);
                     block_updates.push((x, y, z, retracted));
                 }
             } else {
                 // Retract the head.  A sticky piston pulls back a single
                 // pushable block from directly in front of the old head.
                 if block_id(get_block(&world, head.0, head.1, head.2)) == 34 {
-                    world.insert(head, 0);
+                    crate::world::set_block_at(&mut world, head, 0);
                     block_updates.push((head.0, head.1, head.2, 0));
                 }
                 if piston == 29 {
                     let distant = (head.0 + dx, head.1 + dy, head.2 + dz);
                     let pulled = get_block(&world, distant.0, distant.1, distant.2);
                     if piston_pushable(block_id(pulled)) && block_id(get_block(&world, head.0, head.1, head.2)) == 0 {
-                        world.insert(distant, 0);
-                        world.insert(head, pulled);
+                        crate::world::set_block_at(&mut world, distant, 0);
+                        crate::world::set_block_at(&mut world, head, pulled);
                         block_updates.push((distant.0, distant.1, distant.2, 0));
                         block_updates.push((head.0, head.1, head.2, pulled));
                     }

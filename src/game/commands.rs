@@ -3,6 +3,48 @@ use std::time::Duration;
 use crate::packets;
 use crate::util::{get_process_ram_mb, parse_rel_coord};
 use crate::world::SharedState;
+use crate::worldgen::biomes::{self, Biome};
+
+/// Recherche du biome le plus proche en anneaux carrés croissants autour
+/// du joueur (échantillonnage tous les 16 blocs via preview_column, donc
+/// SANS génération de chunk ; portée max 1536 blocs).
+fn locate_nearest_biome(state: &SharedState, entity_id: i32, target: Biome) -> Option<((i32, i32, i32), i32)> {
+    let (px, pz) = {
+        let players = state.players.lock().unwrap();
+        players.get(&entity_id).map(|p| (p.x as i32, p.z as i32)).unwrap_or((0, 0))
+    };
+    let generator = &state.generator;
+    let check = |x: i32, z: i32| -> Option<((i32, i32, i32), i32)> {
+        let col = generator.preview_column(x, z);
+        if col.biome == target {
+            let dist = (((x - px).pow(2) + (z - pz).pow(2)) as f64).sqrt() as i32;
+            Some(((x, col.height + 1, z), dist))
+        } else {
+            None
+        }
+    };
+    if let Some(hit) = check(px, pz) {
+        return Some(hit);
+    }
+    for ring in 1..=96i32 {
+        let r = ring * 16;
+        for x in (px - r..=px + r).step_by(16) {
+            for &z in &[pz - r, pz + r] {
+                if let Some(hit) = check(x, z) {
+                    return Some(hit);
+                }
+            }
+        }
+        for z in (pz - r + 16..pz + r).step_by(16) {
+            for &x in &[px - r, px + r] {
+                if let Some(hit) = check(x, z) {
+                    return Some(hit);
+                }
+            }
+        }
+    }
+    None
+}
 
 pub fn teleport_entity(entity_id: i32, x: f64, y: f64, z: f64, yaw: f32, pitch: f32, state: &SharedState) {
     // Même compensation Y que le spawn (cf. le hack +2 au join) : sans elle,
@@ -78,13 +120,60 @@ pub fn handle_player_command(state: &SharedState, entity_id: i32, message: &str)
             }
         }
         "/help" => {
-            let lines = vec![
-                "§6Commands: §f/gamemode <mode> §7- Change game mode",
-                "§f/tp [<player>|<@a>] [<x> <y> <z>|<player>] §7- Teleport (use ~ §7for relative coords)",
-                "§f/tps §7- Show ticks per second",
-                "§f/load §7- Show RAM and CPU usage",
-                "§f/help §7- This help",
-            ];
+            let lines: Vec<String> = if parts.len() >= 2 {
+                // Aide contextuelle : /help <commande> [sujet]
+                let topic = parts[1];
+                match topic {
+                    "gamemode" => vec![
+                        "§6/gamemode <mode>".to_string(),
+                        "§7Modes: §f0§7=survival, §f1§7=creative, §f2§7=adventure, §f3§7=spectator".to_string(),
+                        "§7Aliases acceptés: survival, creative, adventure, spectator".to_string(),
+                    ],
+                    "tp" | "teleport" => vec![
+                        "§6/tp <x> <y> <z> §7- se téléporter (~ = coordonnée relative)".to_string(),
+                        "§6/tp <player> <x> <y> <z> §7- téléporter un joueur".to_string(),
+                        "§6/tp <player> <target> §7- téléporter vers un joueur".to_string(),
+                        "§6/tp @a <x> <y> <z> §7- téléporter tous les joueurs".to_string(),
+                    ],
+                    "locate" => {
+                        if parts.len() >= 3 && parts[2] == "biome" {
+                            let mut lines: Vec<String> =
+                                vec!["§6Biomes disponibles pour /locate biome :".to_string()];
+                            for &b in biomes::ALL.iter() {
+                                lines.push(format!("§f- {} §7({})", biomes::display_name(b), biomes::params(b).name));
+                            }
+                            lines
+                        } else if parts.len() >= 3 && parts[2] == "structure" {
+                            vec![
+                                "§6/locate structure".to_string(),
+                                "§7Aucune structure n'existe encore dans ce monde.".to_string(),
+                            ]
+                        } else {
+                            vec![
+                                "§6/locate biome <name> §7- biome le plus proche (1536 blocs max)".to_string(),
+                                "§6/locate structure §7- recherche de structure".to_string(),
+                                "§7Liste des biomes: §f/help locate biome".to_string(),
+                            ]
+                        }
+                    }
+                    "tps" => vec!["§6/tps §7- TPS sur 5s, 30s, 5m et 15m".to_string()],
+                    "load" => vec!["§6/load §7- RAM et CPU du processus serveur".to_string()],
+                    _ => vec![format!("§cCommande inconnue: /{topic}")],
+                }
+            } else {
+                vec![
+                    "§6Commands: §f/gamemode <mode> §7- Change game mode",
+                    "§f/tp [<player>|<@a>] [<x> <y> <z>|<player>] §7- Teleport (use ~ §7for relative coords)",
+                    "§f/locate biome <name> §7- Show the nearest biome of that type",
+                    "§f/locate structure §7- Locate a structure",
+                    "§f/tps §7- Show ticks per second",
+                    "§f/load §7- Show RAM and CPU usage",
+                    "§7Type §f/help <command> §7for details (ex: §f/help locate biome§7)",
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect()
+            };
             let players = state.players.lock().unwrap();
             if let Some(player) = players.get(&entity_id) {
                 for line in lines {
@@ -195,6 +284,38 @@ pub fn handle_player_command(state: &SharedState, entity_id: i32, message: &str)
             let players = state.players.lock().unwrap();
             if let Some(player) = players.get(&entity_id) {
                 let _ = player.sender.send(packet);
+            }
+        }
+        "/locate" => {
+            let lines: Vec<String> = if parts.len() >= 2 && parts[1] == "structure" {
+                // Aucune structure générée pour l'instant dans ce monde.
+                vec!["§7There are no structures in this world yet.".to_string()]
+            } else if parts.len() >= 3 && parts[1] == "biome" {
+                let query = parts[2..].join("_");
+                match biomes::by_name(&query) {
+                    Some(target) => match locate_nearest_biome(state, entity_id, target) {
+                        Some(((x, y, z), dist)) => {
+                            let name = biomes::display_name(target);
+                            vec![format!(
+                                "§aThe nearest §f{name}§a is at §f[{x}, {y}, {z}]§7 ({dist} blocks away)"
+                            )]
+                        }
+                        None => vec![format!(
+                            "§cNo {} found within 1536 blocks.",
+                            biomes::display_name(target)
+                        )],
+                    },
+                    None => vec![format!("§cUnknown biome: §f{query}§7 (see /help locate biome)")],
+                }
+            } else {
+                vec!["§cUsage: /locate biome <name> or /locate structure".to_string()]
+            };
+            let players = state.players.lock().unwrap();
+            if let Some(player) = players.get(&entity_id) {
+                for line in &lines {
+                    let packet = packets::build_chat(&format!("{{\"text\":\"{line}\"}}"));
+                    let _ = player.sender.send(packet);
+                }
             }
         }
         "/tps" => {

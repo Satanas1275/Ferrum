@@ -22,7 +22,7 @@ impl Completer for ConsoleHelper {
         _pos: usize,
         _ctx: &rustyline::Context<'_>,
     ) -> rustyline::Result<(usize, Vec<String>)> {
-        let cmds = ["help", "list", "say", "stop", "save-all", "gamemode", "tp", "teleport", "tps", "load"];
+        let cmds = ["help", "list", "say", "stop", "save-all", "gamemode", "tp", "teleport", "tps", "load", "seed"];
         let trimmed = line.trim();
         let completions: Vec<String> = cmds.iter()
             .filter(|c| c.starts_with(trimmed))
@@ -53,6 +53,10 @@ fn handle_console_command(parts: &[&str], state: &SharedState) {
             println!("  stop                        - Shutdown server");
             println!("  tps                         - Show ticks per second");
             println!("  load                        - Show RAM and CPU usage");
+            println!("  seed                        - Show world seed");
+        }
+        "seed" => {
+            println!("Seed: {}", state.generator.seed);
         }
         "list" => {
             let players = state.players.lock().unwrap();
@@ -76,9 +80,8 @@ fn handle_console_command(parts: &[&str], state: &SharedState) {
         "stop" => {
             println!("Saving world...");
             {
-                let blocks = state.world.lock().unwrap().clone();
-                match save::save_all_chunks(&blocks) {
-                    Ok(_) => println!("World saved ({} blocks)", blocks.len()),
+                match crate::world::persist_world(state) {
+                    Ok(n) => println!("World saved ({n} blocks)"),
                     Err(e) => println!("Error saving world: {e}"),
                 }
                 let players = state.players.lock().unwrap();
@@ -106,9 +109,8 @@ fn handle_console_command(parts: &[&str], state: &SharedState) {
         }
         "save-all" => {
             println!("Saving world...");
-            let blocks = state.world.lock().unwrap().clone();
-            match save::save_all_chunks(&blocks) {
-                Ok(_) => println!("World saved ({} blocks)", blocks.len()),
+            match crate::world::persist_world(state) {
+                Ok(n) => println!("World saved ({n} blocks)"),
                 Err(e) => println!("Error saving world: {e}"),
             }
             let players = state.players.lock().unwrap();
