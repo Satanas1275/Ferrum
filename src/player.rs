@@ -28,6 +28,7 @@ pub struct Player {
     pub last_bcast_yaw: u8,
     pub last_bcast_pitch: u8,
     pub last_chunk: (i32, i32),
+    pub view_distance: i32,
 }
 
 impl Player {

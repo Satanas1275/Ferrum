@@ -36,7 +36,14 @@ const SPAWN_SEARCH_RADIUS: i32 = 8;
 const SPAWN_Y_OFFSET: f64 = 2.0;
 
 /// Distance de vue en chunks (rayon autour du chunk du joueur).
-const VIEW_DISTANCE: i32 = 3;
+/// Utilisée comme distance par défaut au join, avant que le client envoie
+/// son propre réglage (paquet Client Settings 0x15). Par défaut 8 chunks =
+/// 17x17 chunks (64x64 blocs), valeur standard d'un serveur vanilla.
+const VIEW_DISTANCE: i32 = 8;
+
+/// Distance de vue maximale imposée par le serveur (empêche un client de
+/// forcer une génération massive de chunks).
+const MAX_VIEW_DISTANCE: i32 = 16;
 
 fn is_interactive_block(stored: u16) -> bool {
     matches!(stored & 0xFFF,
@@ -455,10 +462,10 @@ pub(crate) fn update_chunks_for_player(
     state: &SharedState,
     entity_id: i32,
 ) {
-    let (player_x, player_z, sender_clone) = {
+    let (player_x, player_z, sender_clone, view_distance) = {
         let players = state.players.lock().unwrap();
         match players.get(&entity_id) {
-            Some(p) => (p.x, p.z, p.sender.clone()),
+            Some(p) => (p.x, p.z, p.sender.clone(), p.view_distance),
             None => return,
         }
     };
@@ -466,7 +473,7 @@ pub(crate) fn update_chunks_for_player(
     let player_cx = (player_x.floor() as i32) >> 4;
     let player_cz = (player_z.floor() as i32) >> 4;
 
-    let desired_chunks: HashSet<(i32, i32)> = chunks_in_view(player_cx, player_cz, VIEW_DISTANCE)
+    let desired_chunks: HashSet<(i32, i32)> = chunks_in_view(player_cx, player_cz, view_distance)
         .into_iter().collect();
 
     let (to_load, to_unload) = {
@@ -499,7 +506,7 @@ pub(crate) fn update_chunks_for_player(
         // paquets. Chaque paquet lit directement le tableau dense de son
         // chunk — plus besoin de snapshot ni d'envoi bloc-par-bloc (le
         // paquet 0x21 contient déjà tous les blocs + métadonnées).
-        crate::world::ensure_area(state, player_cx, player_cz, VIEW_DISTANCE);
+        crate::world::ensure_area(state, player_cx, player_cz, view_distance);
         let world = state.world.lock().unwrap();
         for &(cx, cz) in &to_load {
             let pkt = build_chunk_packet(cx, cz, &world);
@@ -901,6 +908,7 @@ pub async fn handle_client(mut socket: TcpStream, state: SharedState) -> std::io
         last_bcast_yaw: 0,
         last_bcast_pitch: 0,
         last_chunk: (i32::MIN, i32::MIN),
+        view_distance: VIEW_DISTANCE,
     };
 
     let (mut reader, mut writer) = socket.into_split();
@@ -1658,6 +1666,28 @@ async fn read_loop(
             crate::game::inventory::handle_click_window(state, entity_id, &data);
         } else if id == 0x10 {
             crate::game::inventory::handle_creative_inventory(state, entity_id, &data);
+        } else if id == 0x15 {
+            let mut idx = 0;
+            let _locale = read_string_buf(&data, &mut idx);
+            let client_view = read_u8_buf(&data, &mut idx) as i32;
+            let view_distance = client_view.clamp(2, MAX_VIEW_DISTANCE);
+            let settings_changed = {
+                let mut players = state.players.lock().unwrap();
+                match players.get_mut(&entity_id) {
+                    Some(p) => {
+                        let changed = p.view_distance != view_distance;
+                        p.view_distance = view_distance;
+                        changed
+                    }
+                    None => false,
+                }
+            };
+            if settings_changed {
+                let s = state.clone();
+                tokio::task::spawn_blocking(move || {
+                    update_chunks_for_player(&s, entity_id);
+                }).await.ok();
+            }
         } else if id == 0x16 {
             let mut idx = 0;
             let action = read_u8_buf(&data, &mut idx);
@@ -1680,21 +1710,23 @@ async fn read_loop(
                 if is_actually_dead {
                 // Respawn au spawn du monde : recherche + génération + paquets
                 // dans spawn_blocking (même logique qu'au join).
+                let respawn_vd = state.players.lock().unwrap()
+                    .get(&entity_id).map(|p| p.view_distance).unwrap_or(VIEW_DISTANCE);
                 let respawn_state = state.clone();
                 let ((spawn_x, spawn_y, spawn_z), rmin_x, rmax_x, rmin_z, rmax_z, own_chunk_pkt, chunk_packets) =
                     tokio::task::spawn_blocking(move || {
                         let (spawn_x, spawn_y, spawn_z) = find_world_spawn(&respawn_state);
                         let spawn_cx0 = (spawn_x.floor() as i32) >> 4;
                         let spawn_cz0 = (spawn_z.floor() as i32) >> 4;
-                        crate::world::ensure_area(&respawn_state, spawn_cx0, spawn_cz0, VIEW_DISTANCE);
+                        crate::world::ensure_area(&respawn_state, spawn_cx0, spawn_cz0, respawn_vd);
                         let spawn_y = spawn_y + SPAWN_Y_OFFSET;
 
                         let spawn_cx = (spawn_x.floor() as i32) >> 4;
                         let spawn_cz = (spawn_z.floor() as i32) >> 4;
-                        let rmin_x = spawn_cx - VIEW_DISTANCE;
-                        let rmax_x = spawn_cx + VIEW_DISTANCE;
-                        let rmin_z = spawn_cz - VIEW_DISTANCE;
-                        let rmax_z = spawn_cz + VIEW_DISTANCE;
+                        let rmin_x = spawn_cx - respawn_vd;
+                        let rmax_x = spawn_cx + respawn_vd;
+                        let rmin_z = spawn_cz - respawn_vd;
+                        let rmax_z = spawn_cz + respawn_vd;
                         // Même principe qu'au join : son propre chunk + sa position en
                         // premier, le reste après (voir commentaire au join plus haut).
                         let world = respawn_state.world.lock().unwrap();

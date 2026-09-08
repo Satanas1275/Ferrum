@@ -368,6 +368,7 @@ mod tests {
             last_bcast_yaw: 0,
             last_bcast_pitch: 0,
             last_chunk: (i32::MIN, i32::MIN),
+            view_distance: 8,
         };
 
         save_player(&player).unwrap();
